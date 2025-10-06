@@ -1,0 +1,45 @@
+[build-system]
+requires = ['hatchling', "hatch-fancy-pypi-readme", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "exosims-plugins"
+description = "A library of plugins for EXOSIMS"
+requires-python = ">=3.10"
+dependencies = ["jax>=0.4.34", "numpy>=2.1.2", "equinox>=0.12.1"]
+license = { file = "LICENSE" }
+dynamic = ['readme', 'version']
+
+
+[project.urls]
+Homepage = "https://github.com/CoreySpohn/exosims-plugins"
+Issues = "https://github.com/CoreySpohn/exosims-plugins/issues"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/exosims_plugins/_version.py"
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[project.optional-dependencies]
+docs = [
+  "sphinx",
+  "myst-nb",
+  "sphinx-book-theme",
+  "sphinx-autoapi",
+  "sphinx_autodoc_typehints",
+  "matplotlib",
+]
+exosims = ["EXOSIMS>=3.4.1"]
+
+[tool.ruff.lint]
+select = ["D", "E", "F", "I"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
