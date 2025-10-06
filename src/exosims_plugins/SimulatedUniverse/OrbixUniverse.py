@@ -1,11 +1,12 @@
+"""Simulated universe that uses orbix to calculate the detection probability."""
+
 import astropy.units as u
 import jax.numpy as jnp
 import numpy as np
-from orbix.system import Planets
-
 from EXOSIMS.SimulatedUniverse.DulzPlavchanUniverseEarthsOnly import (
     DulzPlavchanUniverseEarthsOnly,
 )
+from orbix.system import Planets
 
 
 class OrbixUniverse(DulzPlavchanUniverseEarthsOnly):
@@ -16,6 +17,7 @@ class OrbixUniverse(DulzPlavchanUniverseEarthsOnly):
     """
 
     def __init__(self, *args, **kwargs):
+        """Initialize the OrbixUniverse."""
         super().__init__(*args, **kwargs)
         # Create orbix Planets for each generated planet
         # Index by pInd, create when promoting to characterization

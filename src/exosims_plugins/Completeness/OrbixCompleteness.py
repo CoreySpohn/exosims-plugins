@@ -1,17 +1,19 @@
-from dataclasses import dataclass, field
-from astropy.time import Time
-import astropy.units as u
+"""Completeness model that uses orbix."""
+
 import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
+
+import astropy.units as u
 import jax.numpy as jnp
 import numpy as np
+from astropy.time import Time
+from EXOSIMS.Completeness.BrownCompleteness import BrownCompleteness
+from EXOSIMS.util.atomic_io import atomic_pickle_dump, robust_pickle_load
 from orbix.constants import Msun2kg, rad2arcsec
+from orbix.integrations.exosims.dMag0 import gen_dMag0_hex
 from orbix.system import Planets
 from tqdm import tqdm
-
-from EXOSIMS.Completeness.BrownCompleteness import BrownCompleteness
-from orbix.integrations.exosims.dMag0 import gen_dMag0_hex
-from EXOSIMS.util.atomic_io import robust_pickle_load, atomic_pickle_dump
 
 
 @dataclass
@@ -79,7 +81,7 @@ class OrbixCompleteness(BrownCompleteness):
         return subdir, base_name, ext
 
     def generate_orbix_cache_path(self, TK):
-        """Generate unique filenames for cached orbix products"""
+        """Generate unique filenames for cached orbix products."""
         cache_subdir, base_name, ext = self._get_planets_cache_subdir(TK)
         self.planets_filename = base_name + "_planets_" + ext
         self.orbits_filename = base_name + "_orbits_" + ext
@@ -98,7 +100,7 @@ class OrbixCompleteness(BrownCompleteness):
         return cache_subdir / f"{fname.replace(' ', '')}.txt"
 
     def save_orbix_cache(self, planets_path, orbits_path):
-        """Save the planets object and orbital data to cache files
+        """Save the planets object and orbital data to cache files.
 
         Args:
             planets_path (Path):
@@ -106,7 +108,6 @@ class OrbixCompleteness(BrownCompleteness):
             orbits_path (Path):
                 Path to save the s and dMag orbital data
         """
-
         # Save Planets object parameters
         planets_data = {
             "Ms": np.array(self._planets.Ms),
@@ -138,7 +139,7 @@ class OrbixCompleteness(BrownCompleteness):
         self.vprint("Orbix orbital data stored in %r" % orbits_path)
 
     def load_orbix_cache(self, planets_path, orbits_path):
-        """Load the planets object and orbital data from cache files
+        """Load the planets object and orbital data from cache files.
 
         Args:
             planets_path (Path):
@@ -150,7 +151,6 @@ class OrbixCompleteness(BrownCompleteness):
             bool:
                 True if loading was successful, False otherwise
         """
-
         try:
             # Load Planets object data
             planets_data = robust_pickle_load(str(planets_path))
@@ -188,7 +188,7 @@ class OrbixCompleteness(BrownCompleteness):
             return False
 
     def _generate_orbix_data(self, trig_solver, TK, PPop):
-        """Generate the planets object and propagate orbits to get s and dMag values
+        """Generate the planets object and propagate orbits to get s and dMag values.
 
         Args:
             trig_solver:
@@ -198,7 +198,6 @@ class OrbixCompleteness(BrownCompleteness):
             PPop (PlanetPopulation):
                 PlanetPopulation object
         """
-
         # sample quantities
         a, e, p, Rp = PPop.gen_plan_params(self.Nplanets)
         i, W, w = PPop.gen_angles(self.Nplanets)
@@ -265,7 +264,7 @@ class OrbixCompleteness(BrownCompleteness):
         return subdir, base_name, extstr
 
     def generate_star_ensemble_cache_path(self, TK, SS, sInd):
-        """Generate unique filename for cached star ensemble data for a specific star
+        """Generate unique filename for cached star ensemble data for a specific star.
 
         Args:
             TK (TimeKeeping):
@@ -295,7 +294,7 @@ class OrbixCompleteness(BrownCompleteness):
         return ensemble_subdir / f"{manifest_filename.replace(' ', '')}.txt"
 
     def load_star_ensemble_cache(self, ensemble_path):
-        """Load a single star ensemble object from cache file
+        """Load a single star ensemble object from cache file.
 
         Args:
             ensemble_path (Path):
@@ -305,7 +304,6 @@ class OrbixCompleteness(BrownCompleteness):
             StarEnsemble or None:
                 StarEnsemble object if loading was successful, None otherwise
         """
-
         try:
             # Load star ensemble directly
             star_ensemble = robust_pickle_load(str(ensemble_path))
@@ -316,7 +314,7 @@ class OrbixCompleteness(BrownCompleteness):
             return None
 
     def _generate_single_star_ensemble(self, SS, TK, sInd, fZ):
-        """Generate a single star ensemble object with mask calculation
+        """Generate a single star ensemble object with mask calculation.
 
         Args:
             SS (SurveySimulation):
@@ -325,12 +323,13 @@ class OrbixCompleteness(BrownCompleteness):
                 TimeKeeping object
             sInd (int):
                 Star index
+            fZ (np.ndarray):
+                Zodiacal light brightness.
 
         Returns:
             StarEnsemble:
                 Generated star ensemble object
         """
-
         char_mode = SS.base_char_mode
         fZ = fZ[sInd]
         kEZ = SS.exact_kEZs[sInd]
@@ -372,7 +371,7 @@ class OrbixCompleteness(BrownCompleteness):
         )
 
     def _generate_star_ensembles(self, SS, TK):
-        """Generate star ensemble objects with mask calculations
+        """Generate star ensemble objects with mask calculations.
 
         Args:
             SS (SurveySimulation):
@@ -380,7 +379,6 @@ class OrbixCompleteness(BrownCompleteness):
             TK (TimeKeeping):
                 TimeKeeping object
         """
-
         self.star_ensembles = {}
         sInds = np.arange(SS.TargetList.nStars)
         fZ = np.zeros([sInds.shape[0], len(self.comp_times)])
