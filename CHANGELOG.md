@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/CoreySpohn/exosims-plugins/compare/v1.0.0...v1.0.1) (2025-12-15)
+
+
+### Bug Fixes
+
+* Add intervaltree dependency to pyproject.toml ([09225f5](https://github.com/CoreySpohn/exosims-plugins/commit/09225f547749689eee094e20c1a0e84e354604ef))
+
 ## 1.0.0 (2025-10-07)
 
 
