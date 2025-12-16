@@ -376,7 +376,7 @@ class OrbixScheduler(SurveySimulation):
         nEZ_range = np.array([SU.fixed_nEZ_val])
         self.dMag0s = {}
         self.solver = get_grid_solver(
-            level="planet", jit=False, kind="bilinear", E=False, trig=True
+            level="scalar", jit=False, kind="bilinear", E=False, trig=True
         )
         for mode in OS.observingModes:
             self.dMag0s[mode["hex"]] = dMag0_grid(
