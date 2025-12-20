@@ -37,8 +37,8 @@ class StarEnsemble:
     best_int_times: np.ndarray[float] = field(
         default_factory=lambda: np.zeros(shape=(1,), dtype=np.float64)
     )
-    # best completeness/int_time at each time
-    best_comp_div_intTime: np.ndarray[float] = field(
+    # best completeness/obs_time at each time (obs_time = int_time + overhead)
+    best_comp_div_obsTime: np.ndarray[float] = field(
         default_factory=lambda: np.zeros(shape=(1,), dtype=np.float64)
     )
     # MJD times for the above metrics
@@ -254,10 +254,17 @@ class OrbixCompleteness(BrownCompleteness):
         extstr += "missionStart: " + str(mission_start)
         extstr += "missionLife_d: " + str(mission_life_d)
         char_mode = SS.base_char_mode
+        det_mode = SS.base_det_mode
         extstr += "char_mode: " + str(char_mode["hex"])
+        extstr += "det_mode: " + str(det_mode["hex"])
         extstr += "OpticalSystem: " + SS.OpticalSystem.__class__.__name__
         extstr += "ZodiacalLight: " + SS.ZodiacalLight.__class__.__name__
         extstr += "dMag0_hex: " + gen_dMag0_hex(char_mode, SS)
+        # Include overhead times to invalidate cache when they change
+        det_overhead_d = (
+            det_mode["syst"]["ohTime"] + SS.Observatory.settlingTime
+        ).to_value(u.d)
+        extstr += "det_overhead_d: " + str(det_overhead_d)
         ext = hashlib.md5(extstr.encode("utf-8")).hexdigest()
         subdir = Path(self.cachedir) / f"orbix_ensembles_{ext}"
         subdir.mkdir(parents=True, exist_ok=True)
@@ -313,7 +320,7 @@ class OrbixCompleteness(BrownCompleteness):
             self.vprint(f"Failed to load star ensemble cache: {e}")
             return None
 
-    def _generate_single_star_ensemble(self, SS, TK, sInd, fZ):
+    def _generate_single_star_ensemble(self, SS, TK, sInd, fZ, det_overhead_d):
         """Generate a single star ensemble object with mask calculation.
 
         Args:
@@ -325,6 +332,8 @@ class OrbixCompleteness(BrownCompleteness):
                 Star index
             fZ (np.ndarray):
                 Zodiacal light brightness.
+            det_overhead_d (float):
+                Detection mode overhead time in days (settling + instrument OH).
 
         Returns:
             StarEnsemble:
@@ -346,18 +355,22 @@ class OrbixCompleteness(BrownCompleteness):
         f_valid = mask.sum() / self.Nplanets
         if f_valid > 0.0:
             det_dMag0 = SS.dMag0s[SS.base_det_mode["hex"]][sInd]
-            dyn_comp_div_intTime = np.array(
-                det_dMag0.dyn_comp_vec(SS.solver, alpha, self.dMag, fZ, kEZ, mask)
+            # dyn_comp_vec returns completeness/obs_time when overhead is provided
+            dyn_comp_div_obsTime = np.array(
+                det_dMag0.dyn_comp_vec(
+                    SS.solver, alpha, self.dMag, fZ, kEZ, mask, det_overhead_d
+                )
             )
-            max_dyn_comp_inds = np.argmax(dyn_comp_div_intTime, axis=1)
-            best_int_times = np.array(dMag0.int_times)[max_dyn_comp_inds]
-            best_comp_div_intTime = np.array(dyn_comp_div_intTime)[
-                np.arange(dyn_comp_div_intTime.shape[0]), max_dyn_comp_inds
+
+            max_dyn_comp_inds = np.argmax(dyn_comp_div_obsTime, axis=1)
+            int_times = np.array(det_dMag0.int_times)
+            best_int_times = int_times[max_dyn_comp_inds]
+            best_comp_div_obsTime = np.array(dyn_comp_div_obsTime)[
+                np.arange(dyn_comp_div_obsTime.shape[0]), max_dyn_comp_inds
             ]
         else:
-            dyn_comp_div_intTime = np.zeros(self.Nplanets)
-            best_int_times = np.zeros(self.Nplanets)
-            best_comp_div_intTime = np.zeros(self.Nplanets)
+            best_int_times = np.zeros(len(self.comp_times))
+            best_comp_div_obsTime = np.zeros(len(self.comp_times))
         dtimes = np.array(self.comp_times)
 
         return StarEnsemble(
@@ -366,7 +379,7 @@ class OrbixCompleteness(BrownCompleteness):
             n_orbits=self.Nplanets,
             f_valid=f_valid,
             best_int_times=best_int_times,
-            best_comp_div_intTime=best_comp_div_intTime,
+            best_comp_div_obsTime=best_comp_div_obsTime,
             times=dtimes,
         )
 
@@ -392,6 +405,11 @@ class OrbixCompleteness(BrownCompleteness):
                 SS.base_char_mode,
             ).to_value(SS.fZ_unit)
 
+        # Calculate detection mode overhead in days
+        det_overhead_d = (
+            SS.base_det_mode["syst"]["ohTime"] + SS.Observatory.settlingTime
+        ).to_value(u.d)
+
         # Prepare list to log all ensemble paths used in this run
         manifest_paths = []
 
@@ -408,7 +426,9 @@ class OrbixCompleteness(BrownCompleteness):
                     continue
 
             # Generate new ensemble for this star
-            star_ensemble = self._generate_single_star_ensemble(SS, TK, sInd, fZ)
+            star_ensemble = self._generate_single_star_ensemble(
+                SS, TK, sInd, fZ, det_overhead_d
+            )
             self.star_ensembles[sInd] = star_ensemble
 
             # Save the ensemble to cache

@@ -201,6 +201,8 @@ class PlanetTrack:
     char_successes: int = 0
     det_failures: int = 0
     char_failures: int = 0
+    # Reason for retirement (set when track is retired)
+    retirement_reason: str | None = None
 
     def ready_for_char(self, thresh):
         """Helper to check if the planet track is ready for characterization."""
@@ -239,7 +241,7 @@ class OrbixScheduler(SurveySimulation):
         required_char_successes=1,
         max_char_failures=3,
         max_det_failures=6,
-        min_comp_div_int_time=0.5,
+        min_comp_div_obs_time=0.0,
         min_int_time_hr=1,
         n_int_times=100,
         debug_plots=False,
@@ -263,7 +265,7 @@ class OrbixScheduler(SurveySimulation):
         self._outspec["required_char_successes"] = required_char_successes
         self._outspec["max_char_failures"] = max_char_failures
         self._outspec["max_det_failures"] = max_det_failures
-        self._outspec["min_comp_div_int_time"] = min_comp_div_int_time
+        self._outspec["min_comp_div_obs_time"] = min_comp_div_obs_time
         self._outspec["min_int_time_hr"] = min_int_time_hr
         self._outspec["n_int_times"] = n_int_times
         self._outspec["debug_plots"] = debug_plots
@@ -285,7 +287,7 @@ class OrbixScheduler(SurveySimulation):
         self.pdet_threshold = pdet_threshold
         self.max_char_failures = max_char_failures
         self.max_det_failures = max_det_failures
-        self.min_comp_div_int_time = min_comp_div_int_time
+        self.min_comp_div_obs_time = min_comp_div_obs_time
         self.min_int_time = min_int_time_hr * u.hr
         self.min_int_time_d = self.min_int_time.to_value(u.day)
         self.n_int_times = n_int_times
@@ -294,6 +296,96 @@ class OrbixScheduler(SurveySimulation):
         self.plot_format = plot_format
         self.plot_dir = plot_dir
         self.max_requeue_attempts = max_requeue_attempts
+
+        # Build ko_intervals from koMaps (must be after super().__init__())
+        self._build_ko_intervals()
+
+    def _build_ko_intervals(self):
+        """Build IntervalTree structures for keepout from koMaps.
+
+        Converts the boolean koMaps (True=observable) into IntervalTrees
+        containing keepout periods (intervals where star is NOT observable).
+        This provides efficient interval queries for observability checks.
+
+        This is a self-contained version of the logic originally in
+        Observatory.generate_ko_intervals(), migrated here to avoid
+        modifying the EXOSIMS Prototypes from within exosims-plugins.
+        """
+        if not hasattr(self, "koMaps") or not hasattr(self, "koTimes_mjd"):
+            self.logger.warning(
+                "koMaps/koTimes not available, ko_intervals will be empty"
+            )
+            self.ko_intervals = {}
+            return
+
+        TL = self.TargetList
+        koMaps = self.koMaps
+        koTimes_mjd = self.koTimes_mjd
+        mission_finish_mjd = self.TimeKeeping.missionFinishAbs.mjd
+        ko_dt_step_val = self.Observatory.ko_dtStep.to_value(u.d)
+
+        self.ko_intervals = {}
+
+        for mode_name, current_koMap_for_mode in koMaps.items():
+            # current_koMap_for_mode is (nStars, nTimes), True == observable
+            mode_specific_trees = [IntervalTree() for _ in range(TL.nStars)]
+            self.ko_intervals[mode_name] = mode_specific_trees
+
+            if not koTimes_mjd.size > 0:
+                continue
+
+            for sInd in range(TL.nStars):
+                sInd_tree = mode_specific_trees[sInd]
+
+                t_idx = 0
+                n_times = koTimes_mjd.size
+
+                while t_idx < n_times:
+                    is_observable_current_bin = current_koMap_for_mode[sInd, t_idx]
+
+                    if not is_observable_current_bin:
+                        # Found the start of a keepout block
+                        block_start_mjd = koTimes_mjd[t_idx]
+
+                        # Find the end of this contiguous keepout block
+                        block_last_t_idx_in_sequence = t_idx
+
+                        # Look ahead to find how far this keepout sequence extends
+                        while (
+                            block_last_t_idx_in_sequence + 1 < n_times
+                            and not current_koMap_for_mode[
+                                sInd, block_last_t_idx_in_sequence + 1
+                            ]
+                        ):
+                            block_last_t_idx_in_sequence += 1
+
+                        # The keepout block includes bins from t_idx to
+                        # block_last_t_idx_in_sequence. The MJD end of this entire
+                        # block is the end of the *last bin* in the sequence.
+                        block_end_mjd = (
+                            koTimes_mjd[block_last_t_idx_in_sequence] + ko_dt_step_val
+                        )
+
+                        # Ensure the interval does not exceed mission finish time
+                        block_end_mjd = min(block_end_mjd, mission_finish_mjd)
+
+                        if block_end_mjd > block_start_mjd:
+                            sInd_tree.addi(block_start_mjd, block_end_mjd, "keepout")
+
+                        # Advance t_idx to the position *after* the processed block
+                        t_idx = block_last_t_idx_in_sequence + 1
+                    else:
+                        # Observable, so just move to the next time step
+                        t_idx += 1
+
+                # Merge overlaps as a safeguard against floating-point edge cases
+                if len(sInd_tree) > 0:
+                    sInd_tree.merge_overlaps()
+
+        self.logger.info(
+            f"Built ko_intervals for {len(self.ko_intervals)} modes, "
+            f"{TL.nStars} stars each"
+        )
 
     def initializeStorageArrays(self):
         """Initialize all storage arrays based on # of stars and targets."""
@@ -327,6 +419,7 @@ class OrbixScheduler(SurveySimulation):
         self.schedule: list[ScheduleAction] = []
         self._itr = IntervalTree()
         self.history: list[ScheduleAction] = []
+        self.wait_actions: list[ScheduleAction] = []  # Track wait periods for plotting
 
         # Create the planet tracks
         # Indexed by (sInd, pInd)
@@ -448,6 +541,9 @@ class OrbixScheduler(SurveySimulation):
                 # NOTE: I maintain that this is funny
                 # action.result = self.do_worthless_observation(action)
                 pass
+            elif action.purpose == "wait":
+                # Waiting for targets to become available - just advance time
+                self.wait_actions.append(action)  # Track for plotting
             if action.result is False:
                 # If the action failed to allocate time, break out of the loop
                 break
@@ -487,6 +583,10 @@ class OrbixScheduler(SurveySimulation):
             action (ScheduleAction):
                 The action to respond to.
         """
+        # Wait actions don't need any response processing
+        if action.purpose == "wait":
+            return
+
         completed_track_stage = None
 
         # Determine the stage of the completed observation
@@ -630,27 +730,39 @@ class OrbixScheduler(SurveySimulation):
             )
             alphas = Comp.s[:, comp_t_inds] * Comp.alpha_factors[sInd]
             dMags = Comp.dMag[:, comp_t_inds]
+            # Calculate detection overhead in days
+            det_overhead_d = (
+                self.base_det_mode["syst"]["ohTime"] + self.Observatory.settlingTime
+            ).to_value(u.d)
             # This calculates the dynamic completeness as a function of
-            # integration time
-            dyn_comp_div_intTime = np.array(
+            # observation time (returns comp/obs_time where obs_time = int_time + OH)
+            dyn_comp_div_obsTime = np.array(
                 _dMag0Grid.dyn_comp_vec(
-                    self.solver, alphas, dMags, fZ, kEZ, ens.valid_orbits
+                    self.solver,
+                    alphas,
+                    dMags,
+                    fZ,
+                    kEZ,
+                    ens.valid_orbits,
+                    det_overhead_d,
                 )
             )
+
             # For each obs time, get the maximum dynamic completeness value
             # and the integration time that gives it
-            max_dyn_comp_inds = np.argmax(dyn_comp_div_intTime, axis=1)
-            ens.best_int_times = np.array(_dMag0Grid.int_times)[max_dyn_comp_inds]
-            ens.best_comp_div_intTime = np.array(dyn_comp_div_intTime)[
-                np.arange(dyn_comp_div_intTime.shape[0]), max_dyn_comp_inds
+            int_times = np.array(_dMag0Grid.int_times)
+            max_dyn_comp_inds = np.argmax(dyn_comp_div_obsTime, axis=1)
+            ens.best_int_times = int_times[max_dyn_comp_inds]
+            ens.best_comp_div_obsTime = np.array(dyn_comp_div_obsTime)[
+                np.arange(dyn_comp_div_obsTime.shape[0]), max_dyn_comp_inds
             ]
             ens.times = np.array(dtimes)
             # Get the first time where the comp/int_time is > 0.5 of the max
             # This is just a simple way to avoid making a bunch of immediate
             # revisit observations
-            max_remaining = ens.best_comp_div_intTime.max()
+            max_remaining = ens.best_comp_div_obsTime.max()
             remaining_times = ens.times[
-                ens.best_comp_div_intTime > 0.75 * max_remaining
+                ens.best_comp_div_obsTime > 0.75 * max_remaining
             ]
             if remaining_times.size:
                 first_available_time = remaining_times[0]
@@ -688,12 +800,6 @@ class OrbixScheduler(SurveySimulation):
             key = (sInd, int(pInd))
             if key in self.retired_tracks:
                 continue
-            # if pInd == 109:
-            #     # Get the history of this star
-            #     all_obs = [obs for obs in self.history if obs.target.sInd == sInd]
-            #     all_obs.append(action)
-            #     if len(all_obs) >= 2:
-            #         breakpoint()
 
             # Add to the set of all detected planets
             self._all_detected_planets.add(key)
@@ -708,42 +814,115 @@ class OrbixScheduler(SurveySimulation):
             # Improve orbital estimate with error progression
             self._update_orbit(track)
             track.bump_detection()
-            if self._check_characterizable(track):
+            is_char, failure_reason = self._check_characterizable(track)
+            if is_char:
                 self._queue_followup(track, action)
             else:
-                # Planet will never be characterizable
-                # :(
-                self._retire_track(track)
+                # Planet will never be characterizable - use specific failure reason
+                reason = failure_reason or "not_characterizable"
+                self._retire_track(track, reason=reason)
 
     def _check_characterizable(self, track):
-        """Check if the planet is characterizable at any time in the future."""
+        """Check if the planet is characterizable at any time in the future.
+
+        A planet is considered characterizable if there exists at least one
+        time during the remaining mission when it could be observed with
+        the characterization mode (spectroscopy) with pdet > 0.
+
+        The check accounts for:
+        - The larger IWA of the characterization mode (due to longer wavelength)
+        - The different contrast limits of the spectroscopy mode
+        - The planet's orbital motion over the remaining mission
+
+        Returns:
+            tuple: (is_characterizable: bool, failure_reason: str or None)
+                failure_reason is one of:
+                - None (if characterizable)
+                - "not_char_iwa" (planet inside char mode IWA)
+                - "not_char_owa" (planet outside char mode OWA)
+                - "not_char_phot" (planet too faint for spectroscopy)
+        """
+        SU = self.SimulatedUniverse
+        TK = self.TimeKeeping
+        char_mode = self.base_char_mode
+
         # Check if this planet would be characterizable using char mode
-        char_dMag0Grid = self.dMag0s[self.base_char_mode["hex"]][track.sInd]
+        char_dMag0Grid = self.dMag0s[char_mode["hex"]][track.sInd]
 
         # Check if characterizable at any integration time
-        planets = self.SimulatedUniverse.orbix_planets[track.pInd]
+        planets = SU.orbix_planets[track.pInd]
 
         # Times for the remaining mission
         times = jnp.arange(
-            self.TimeKeeping.currentTimeNorm.to_value(u.day),
-            self.TimeKeeping.missionLife_d,
+            TK.currentTimeNorm.to_value(u.day),
+            TK.missionLife_d,
             1,
         )
         time_inds = (
             np.searchsorted(
                 self.koTimes_mjd,
-                times + self.TimeKeeping.missionStart.mjd,
+                times + TK.missionStart.mjd,
                 side="right",
             )
             - 1
         )
-        fZ = self.ZodiacalLight.fZMap[self.base_char_mode["syst"]["name"]][
-            track.sInd, time_inds
-        ]
+        fZ = self.ZodiacalLight.fZMap[char_mode["syst"]["name"]][track.sInd, time_inds]
         kEZ = self.exact_kEZs[track.sInd]
         char_pdet = char_dMag0Grid.pdet_planets(self.solver, times, planets, fZ, kEZ)
-        is_characterizable = jnp.any(char_pdet > 0)
-        return is_characterizable
+        max_char_pdet = float(jnp.max(char_pdet))
+        is_characterizable = max_char_pdet > 0
+
+        failure_reason = None
+
+        # Log diagnostic information for planets that fail the characterization check
+        if not is_characterizable:
+            # Use the new diagnostic method to determine primary failure reason
+            diag = char_dMag0Grid.diagnose_planets(
+                self.solver, times, planets, jnp.array(fZ), kEZ
+            )
+
+            # Get the planet's current WA and dMag
+            current_WA = SU.WA[track.pInd].to_value(u.arcsec)
+            current_dMag = SU.dMag[track.pInd]
+
+            # Get the angular separation range over the orbits
+            alpha, dMag = planets.j_alpha_dMag(self.solver, times)
+            min_alpha = float(jnp.min(alpha))
+            max_alpha = float(jnp.max(alpha))
+            min_dMag = float(jnp.min(dMag))
+            max_dMag = float(jnp.max(dMag))
+
+            # Get IWA/OWA for char mode
+            char_IWA = char_mode["IWA"].to_value(u.arcsec)
+            char_OWA = char_mode["OWA"].to_value(u.arcsec)
+
+            # Map primary failure to specific reason code
+            primary = diag["primary_failure"]
+            if primary == "geometric_iwa":
+                failure_reason = "not_char_iwa"
+            elif primary == "geometric_owa":
+                failure_reason = "not_char_owa"
+            elif primary == "photometric":
+                failure_reason = "not_char_phot"
+            else:
+                failure_reason = "not_characterizable"
+
+            geom_iwa_pct = diag["geom_fail_iwa"]
+            geom_owa_pct = diag["geom_fail_owa"]
+            self.logger.info(
+                f"NOT_CHAR: Planet ({track.sInd},{track.pInd}) - "
+                f"Reason: {failure_reason} | "
+                f'Current: WA={current_WA:.4f}", dMag={current_dMag:.1f} | '
+                f'Orbit range: WA=[{min_alpha:.4f},{max_alpha:.4f}]", '
+                f"dMag=[{min_dMag:.1f},{max_dMag:.1f}] | "
+                f'Char IWA/OWA: [{char_IWA:.4f},{char_OWA:.3f}]" | '
+                f"Geom fail: {diag['frac_geom_fail']:.0%} "
+                f"(IWA: {geom_iwa_pct:.0%}, OWA: {geom_owa_pct:.0%}) | "
+                f"Phot fail: {diag['frac_phot_fail']:.0%} | "
+                f"Max pdet: {max_char_pdet:.4f}"
+            )
+
+        return is_characterizable, failure_reason
 
     def _process_characterization(self, action: ScheduleAction) -> None:
         """Advance or retry tracks depending on success."""
@@ -794,7 +973,7 @@ class OrbixScheduler(SurveySimulation):
                     self._completed_planets.add(key)
 
                     # Remove from planet_tracks to prevent further scheduling
-                    self._retire_track(track)
+                    self._retire_track(track, reason="completed")
 
                     # Check if this was the last planet for this star
                     remaining_planets_for_star = [
@@ -818,7 +997,7 @@ class OrbixScheduler(SurveySimulation):
                     self._queue_followup(track, action)
                 else:
                     # Remove the planet from tracking after too many failures
-                    self._retire_track(track)
+                    self._retire_track(track, reason="max_char_failures")
 
     def _update_orbit(self, track):
         """Update the orbit of the given planet track."""
@@ -1086,9 +1265,10 @@ class OrbixScheduler(SurveySimulation):
                 # No valid windows found even without overlaps
                 return None, None, max_pdet, None, None
 
-            # Pick the highest pdet/intTime window
-            pdet_div_int = pdet_wo_sched / _int_times
-            row, col = jnp.unravel_index(jnp.argmax(pdet_div_int), pdet_div_int.shape)
+            # Pick the highest pdet/obs_time window (accounting for overhead)
+            obs_times = _int_times + oh
+            pdet_div_obs = pdet_wo_sched / obs_times
+            row, col = jnp.unravel_index(jnp.argmax(pdet_div_obs), pdet_div_obs.shape)
             cand_start = cand_starts[row, col]
             cand_end = cand_ends[row, col]
             pdet_val = pdet_wo_sched[row, col]
@@ -1149,33 +1329,36 @@ class OrbixScheduler(SurveySimulation):
 
             return None, None, max_pdet, None, None
 
-        pdet_div_int_time = pdet / _int_times
+        # Calculate pdet/obs_time where obs_time = int_time + overhead
+        # This accounts for overhead in the optimization to avoid many short obs
+        obs_times = _int_times + oh
+        pdet_div_obs_time = pdet / obs_times
 
         # Add a penalty for the time until the observation to prioritize
         # fast follow-ups
         time_penalty = (prop_times - current_time) / 100000000
-        pdet_div_int_time = pdet_div_int_time - time_penalty[:, None]
+        pdet_div_obs_time = pdet_div_obs_time - time_penalty[:, None]
 
         # Get the best time/int_time
         row, col = jnp.unravel_index(
-            jnp.argmax(pdet_div_int_time), pdet_div_int_time.shape
+            jnp.argmax(pdet_div_obs_time), pdet_div_obs_time.shape
         )
         # If we've failed characterization(s) of this planet then we increase
-        # the integration time by 2*n_failures rows in the pdet_div_int_time
+        # the integration time by 2*n_failures rows in the pdet_div_obs_time
         # array (if it's an acceptable follow-up)
         if is_char and track.char_failures > 0:
             # Check that we can increase the integration time by 2*n_failures rows
             backdowns = np.arange(1, 2 * track.char_failures + 1)
             for backdown in reversed(backdowns):
-                valid_int_time = col + backdown < pdet_div_int_time.shape[1]
-                valid_observation = pdet_div_int_time[row, col + backdown] > 0
+                valid_int_time = col + backdown < pdet_div_obs_time.shape[1]
+                valid_observation = pdet_div_obs_time[row, col + backdown] > 0
                 if valid_int_time and valid_observation:
                     col += backdown
                     break
 
         t_start = prop_times[row] + TK.missionStart.mjd
         int_time = _int_times[col]
-        pdet_val = pdet_div_int_time[row, col] * int_time
+        pdet_val = pdet_div_obs_time[row, col] * obs_times[col]
 
         # Calculate predicted values at the selected time
         selected_time_norm = prop_times[row]
@@ -1307,6 +1490,19 @@ class OrbixScheduler(SurveySimulation):
 
     def _add_action(self, action):
         """Helper to add an action to the schedule, I keep forgetting the syntax."""
+        # Check for zero-length intervals (IntervalTree doesn't allow them)
+        if action.start >= action.end:
+            # Skip zero-length or invalid intervals
+            # For wait actions with zero duration, there's nothing to schedule
+            if action.purpose == "wait":
+                return  # Don't add zero-length wait actions
+            # For other actions, this shouldn't happen, but log a warning
+            self.vprint(
+                f"Warning: Skipping {action.purpose} action with zero or negative "
+                f"duration (start={action.start}, end={action.end})"
+            )
+            return
+
         _interval = Interval(
             float(action.start), float(action.end), (action.purpose, action.target)
         )
@@ -1321,11 +1517,34 @@ class OrbixScheduler(SurveySimulation):
         self._itr.remove(_interval)
         self.schedule.remove(action)
 
-    def _retire_track(self, track):
+    def _retire_track(self, track, reason="unknown"):
+        """Retire a planet track, only ignoring star if no other tracks remain.
+
+        Args:
+            track (PlanetTrack):
+                The track to retire
+            reason (str):
+                Why the track is being retired. Options: "not_characterizable",
+                "max_char_failures", "max_det_failures", "max_requeue_attempts",
+                "completed", "unknown"
+        """
         key = (track.sInd, track.pInd)
+        track.retirement_reason = reason
         self.retired_tracks[key] = track
         del self.planet_tracks[key]
-        self.ignore_stars.append(track.sInd)
+
+        # Only add star to ignore_stars if NO other active planet tracks exist
+        # for this star
+        remaining_tracks_for_star = [
+            t for t in self.planet_tracks.values() if t.sInd == track.sInd
+        ]
+        if not remaining_tracks_for_star:
+            if track.sInd not in self.ignore_stars:
+                self.ignore_stars.append(track.sInd)
+                self.logger.info(
+                    f"RETIRE: Star {track.sInd} added to ignore_stars "
+                    f"(no more active tracks)"
+                )
 
         # Clean up retry tracking
         if key in self.track_retry_counts:
@@ -1338,6 +1557,9 @@ class OrbixScheduler(SurveySimulation):
 
         for action in self.schedule:
             # Check the schedule and remove any lingering actions
+            # Skip actions without targets (e.g., wait actions)
+            if action.target is None:
+                continue
             if action.target.sInd == track.sInd and action.target.pInd == track.pInd:
                 self._remove_action(action)
 
@@ -1406,6 +1628,11 @@ class OrbixScheduler(SurveySimulation):
         action = self.select_target(blind_sInds, blind_intTimes, slewTimes)
         if action is not None:
             self._add_action(action)
+        elif len(self.schedule) == 0:
+            # No action scheduled and no existing schedule - check if we should wait
+            wait_action = self._create_wait_for_future_targets()
+            if wait_action is not None:
+                self._add_action(wait_action)
 
     def init_epoch(self, det_mode, char_mode):
         """Create epoch object for next_target."""
@@ -1913,16 +2140,17 @@ class OrbixScheduler(SurveySimulation):
         if len(blind_sInds) > 0:
             # Choose a blind detection target
             purpose = "detection"
-            target, int_time, wait_time, comp, comp_d_t = self.choose_blind_target(
-                blind_sInds, blind_intTimes, slewTimes
+            target, int_time, wait_time, comp, comp_div_obs_time = (
+                self.choose_blind_target(blind_sInds, blind_intTimes, slewTimes)
             )
             oh = (
                 self.Observatory.settlingTime + self.base_det_mode["syst"]["ohTime"]
             ).to_value(u.day)
         if target is None:
-            # No targets available, return None
+            # No targets available from filtered set, return None
+            # Wait logic is handled in next_action with full star set
             return None
-        if comp_d_t < self.min_comp_div_int_time:
+        if comp_div_obs_time < self.min_comp_div_obs_time:
             # Observations are not providing significant information, so we should
             # wait until the next possible observation
 
@@ -1965,6 +2193,96 @@ class OrbixScheduler(SurveySimulation):
             action.mode = self.base_det_mode
         return action
 
+    def _create_wait_for_future_targets(self):
+        """Create a wait action when no targets are currently available.
+
+        Checks ALL characterizable stars (not just filtered ones) to find the
+        earliest time when any target might become observable. Considers:
+        - Stars currently in keepout (when do they exit?)
+        - Stars with next_available_time in the future
+
+        Returns:
+            ScheduleAction or None:
+                A wait action to advance time, or None if no valid wait.
+        """
+        TK = self.TimeKeeping
+        Comp = self.Completeness
+
+        current_time_mjd = TK.currentTimeAbs.mjd
+        mission_end_mjd = TK.missionFinishAbs.mjd
+        mode_name = self.base_det_mode["syst"]["name"]
+
+        # Get ALL characterizable stars (before any filtering)
+        all_sInds = self.Completeness.characterizable_sInds
+        # Remove fully characterized/ignored stars
+        all_sInds = np.setdiff1d(all_sInds, self.ignore_stars)
+
+        if len(all_sInds) == 0:
+            self.vprint("No characterizable stars remaining.")
+            return None
+
+        earliest_available_mjd = np.inf
+
+        for sInd in all_sInds:
+            # Check next_available_time from star ensemble
+            star_ensemble = Comp.star_ensembles.get(sInd)
+            if star_ensemble is not None:
+                next_avail_norm = star_ensemble.next_available_time
+                if np.isfinite(next_avail_norm):
+                    next_avail_mjd = TK.missionStart.mjd + next_avail_norm
+                    if next_avail_mjd > current_time_mjd:
+                        earliest_available_mjd = min(
+                            earliest_available_mjd, next_avail_mjd
+                        )
+
+            # Check keepout exit time if star is currently in keepout
+            if mode_name in self.ko_intervals and sInd in self.ko_intervals[mode_name]:
+                star_ko_tree = self.ko_intervals[mode_name][sInd]
+                # Find intervals containing current time (star is in keepout now)
+                current_ko_intervals = star_ko_tree.at(current_time_mjd)
+                for interval in current_ko_intervals:
+                    # interval.end is when keepout ends (star becomes observable)
+                    if interval.end > current_time_mjd:
+                        earliest_available_mjd = min(
+                            earliest_available_mjd, interval.end
+                        )
+
+        # If no future availability found, nothing to wait for
+        if not np.isfinite(earliest_available_mjd):
+            self.vprint("No finite future availability found for any star.")
+            return None
+
+        # Check that wait target is before mission end
+        if earliest_available_mjd >= mission_end_mjd:
+            self.vprint("Earliest availability is past mission end.")
+            return None
+
+        # Calculate wait duration with small buffer to ensure availability
+        wait_duration = earliest_available_mjd - current_time_mjd + 0.5
+
+        # Ensure the wait doesn't exceed mission end
+        if current_time_mjd + wait_duration > mission_end_mjd:
+            wait_duration = mission_end_mjd - current_time_mjd - 0.1
+
+        # Use a small epsilon to avoid floating point precision issues
+        # that could result in zero-length intervals
+        MIN_WAIT_DURATION = 1e-6  # 1 microsecond in days
+        if wait_duration <= MIN_WAIT_DURATION:
+            return None
+
+        # self.vprint(
+        #     f"No targets currently available. Scheduling wait of {wait_duration:.2f} "
+        #     f"days (until MJD {current_time_mjd + wait_duration:.2f})."
+        # )
+
+        return ScheduleAction(
+            start=current_time_mjd,
+            duration=wait_duration,
+            purpose="wait",
+            target=None,
+            mode=None,
+        )
+
     def choose_blind_target(self, sInds, intTimes, slewTimes):
         """Choose a target from the list of blind targets.
 
@@ -1977,19 +2295,38 @@ class OrbixScheduler(SurveySimulation):
                 Integration times for the available blind targets
             slewTimes (astropy Quantity array):
                 Slew times for the available blind targets
+
+        Returns:
+            tuple:
+                target (Target or None):
+                    The selected target, or None if no target available
+                int_time (astropy Quantity or None):
+                    Integration time for the target
+                slew_time (astropy Quantity or None):
+                    Slew time for the target
+                comp (float):
+                    Completeness for the target
+                comp_div_obs_time (float):
+                    Completeness divided by observation time (int_time + overhead)
         """
         Comp = self.Completeness
         TK = self.TimeKeeping
+        current_time_norm = TK.currentTimeNorm.to_value(u.day)
 
         if len(sInds) == 0:
             return None, None, None, 0, 0
 
-        best_comp_div_intTime = 0
+        best_comp_div_obsTime = 0
         best_sInd = None
         best_int_time = None
         best_ind = None
 
-        # Check all available stars and find the one with highest comp/intTime
+        # Calculate detection overhead in days
+        det_overhead_d = (
+            self.base_det_mode["syst"]["ohTime"] + self.Observatory.settlingTime
+        ).to_value(u.d)
+
+        # Check all available stars and find the one with highest comp/obsTime
         for i, sInd in enumerate(sInds):
             star_ensemble = Comp.star_ensembles.get(sInd)
             if star_ensemble is None:
@@ -1997,42 +2334,44 @@ class OrbixScheduler(SurveySimulation):
                 continue
 
             # Check if star is available (not in waiting period)
-            if TK.currentTimeNorm.to_value(u.day) < star_ensemble.next_available_time:
+            if current_time_norm < star_ensemble.next_available_time:
                 continue
 
             # Find the time index closest to current time
             t_ind = (
                 np.searchsorted(
                     star_ensemble.times,
-                    TK.currentTimeNorm.to_value(u.day),
+                    current_time_norm,
                     side="right",
                 )
                 - 1
             )
             # Clamp to valid range
-            t_ind = np.clip(t_ind, 0, len(star_ensemble.best_comp_div_intTime) - 1)
+            t_ind = np.clip(t_ind, 0, len(star_ensemble.best_comp_div_obsTime) - 1)
 
-            # Get the completeness/intTime for this star at this time
-            comp_div_intTime = star_ensemble.best_comp_div_intTime[t_ind]
+            # Get the completeness/obsTime for this star at this time
+            comp_div_obsTime = star_ensemble.best_comp_div_obsTime[t_ind]
 
-            if comp_div_intTime > best_comp_div_intTime:
-                best_comp_div_intTime = comp_div_intTime
+            if comp_div_obsTime > best_comp_div_obsTime:
+                best_comp_div_obsTime = comp_div_obsTime
                 best_sInd = sInd
                 best_int_time = star_ensemble.best_int_times[t_ind]
                 best_ind = i
 
         if best_sInd is None:
-            # No valid targets available
+            # No valid targets available now
             return None, None, None, 0, 0
 
         # Get the slew time for the selected target
         slew_time = slewTimes[best_ind]
 
         # Calculate completeness
-        comp = self.PlanetPopulation._eta * best_comp_div_intTime * best_int_time
+        # comp/obs_time * obs_time = comp, so we recover the actual completeness
+        obs_time = best_int_time + det_overhead_d
+        comp = self.PlanetPopulation.input_eta * best_comp_div_obsTime * obs_time
 
         target = Target.star(best_sInd)
-        return target, best_int_time * u.d, slew_time, comp, best_comp_div_intTime
+        return target, best_int_time * u.d, slew_time, comp, best_comp_div_obsTime
 
     def observation_detection(self, sInd, intTime, mode):
         """Determines detection SNR and detection status for a given integration time.
@@ -2480,6 +2819,27 @@ class OrbixScheduler(SurveySimulation):
         self.char_modes = char_modes
         self.base_char_mode = char_modes[0]
 
+        # Log important mode differences that affect characterization
+        det_IWA = base_det_mode["IWA"].to_value(u.arcsec)
+        det_OWA = base_det_mode["OWA"].to_value(u.arcsec)
+        char_IWA = self.base_char_mode["IWA"].to_value(u.arcsec)
+        char_OWA = self.base_char_mode["OWA"].to_value(u.arcsec)
+        det_lam = base_det_mode["lam"].to_value(u.nm)
+        char_lam = self.base_char_mode["lam"].to_value(u.nm)
+
+        self.logger.info(
+            f"MODE CONFIG: Detection ({det_lam:.0f}nm) IWA/OWA: "
+            f"[{det_IWA:.4f}, {det_OWA:.3f}] arcsec"
+        )
+        self.logger.info(
+            f"MODE CONFIG: Characterization ({char_lam:.0f}nm) IWA/OWA: "
+            f"[{char_IWA:.4f}, {char_OWA:.3f}] arcsec"
+        )
+        self.logger.info(
+            f"MODE CONFIG: IWA ratio (char/det): {char_IWA/det_IWA:.2f}x - "
+            f'Planets with WA < {char_IWA:.4f}" cannot be characterized'
+        )
+
     def do_detection(self, action):
         """Tasks related to a detection observation."""
         SU, TL, TK, Comp, Obs = (
@@ -2689,7 +3049,7 @@ class OrbixScheduler(SurveySimulation):
         Also prints a second line with integration time, number of planets, and
         color-coded planet indices.
         """
-        if action.purpose == "general_astrophysics":
+        if action.purpose in ("general_astrophysics", "wait"):
             return
         # Start by just adding the action to our history list
         self.history.append(action)
@@ -2789,9 +3149,8 @@ class OrbixScheduler(SurveySimulation):
         lines = [
             "\n══════════════ MISSION TRACKER ══════════════",
             (
-                f"Unique stars: {stats['total_stars_visited']} | "
-                f"Planets: {stats['detected_planets']} detected "
-                f"| Comp: {stats['comp']:.2f}"
+                f"Planets: {stats['detected_planets']} detected | "
+                f"{stats['chars_completed']} characterized"
             ),
             (
                 f"Active planet tracks: {stats['active_planets']} | "
@@ -2799,10 +3158,11 @@ class OrbixScheduler(SurveySimulation):
                 f"| {stats['deferred_tracks']} deferred"
             ),
             # Total number of blind observations | Number of scheduled
-            # observations carried out
+            # observations carried out | Unique stars visited
             (
                 f"Observations: {stats['blind_observations']} blind "
-                f"| {stats['past_scheduled_observations']} scheduled"
+                f"| {stats['past_scheduled_observations']} scheduled | "
+                f"Unique stars: {stats['total_stars_visited']}"
             ),
         ]
 
@@ -2857,6 +3217,7 @@ class OrbixScheduler(SurveySimulation):
             )
         else:
             lines.append(f"Completed characterizations: {chars_completed}")
+        lines.append(f"Characterization completeness: {stats['comp']:.2f}")
 
         # Observation time stats with percentage
         lines.append(
@@ -3740,18 +4101,30 @@ class OrbixScheduler(SurveySimulation):
 
         avg_followup_wait = np.mean(followup_waits) if followup_waits else 0.0
 
-        # Retired tracks summary
+        # Detailed retired tracks summary by reason
         retired_total = len(self.retired_tracks)
-        retired_max_det_fail = 0
-        retired_max_char_fail = 0
+        retirement_reasons = Counter()
 
         for track in self.retired_tracks.values():
-            if track.det_failures >= self.max_det_failures:
-                retired_max_det_fail += 1
-            elif track.char_failures >= self.max_char_failures:
-                retired_max_char_fail += 1
+            reason = getattr(track, "retirement_reason", "unknown")
+            retirement_reasons[reason] += 1
 
-        retired_other = retired_total - retired_max_det_fail - retired_max_char_fail
+        # Legacy compatibility and detailed NC breakdown
+        retired_max_det_fail = retirement_reasons.get("max_det_failures", 0)
+        retired_max_char_fail = retirement_reasons.get("max_char_failures", 0)
+        retired_nc_iwa = retirement_reasons.get("not_char_iwa", 0)
+        retired_nc_owa = retirement_reasons.get("not_char_owa", 0)
+        retired_nc_phot = retirement_reasons.get("not_char_phot", 0)
+        retired_nc_generic = retirement_reasons.get("not_characterizable", 0)
+        retired_not_char = (
+            retired_nc_iwa + retired_nc_owa + retired_nc_phot + retired_nc_generic
+        )
+        retired_completed = retirement_reasons.get("completed", 0)
+        retired_max_requeue = retirement_reasons.get("max_requeue_attempts", 0)
+        retired_other = retired_total - sum(retirement_reasons.values())
+
+        # Calculate total characterization completeness (same as stats['comp'])
+        total_char_comp = sum(action.comp for action in self.history)
 
         extended_stats = {
             "num_blind_dets_attempted": blind_dets,
@@ -3760,14 +4133,57 @@ class OrbixScheduler(SurveySimulation):
             "total_int_time_blind_dets_d": float(blind_int_time.to_value(u.d)),
             "total_int_time_followup_dets_d": float(followup_int_time.to_value(u.d)),
             "total_int_time_chars_d": float(char_int_time.to_value(u.d)),
+            "total_char_comp": total_char_comp,
             "avg_followup_wait_d": float(avg_followup_wait),
             "num_retired_tracks": retired_total,
             "retired_due_to_max_det_failures": retired_max_det_fail,
             "retired_due_to_max_char_failures": retired_max_char_fail,
+            "retired_due_to_not_characterizable": retired_not_char,
+            "retired_nc_inside_iwa": retired_nc_iwa,
+            "retired_nc_outside_owa": retired_nc_owa,
+            "retired_nc_too_faint": retired_nc_phot,
+            "retired_nc_other": retired_nc_generic,
+            "retired_due_to_completed": retired_completed,
+            "retired_due_to_max_requeue_attempts": retired_max_requeue,
             "retired_due_to_other": retired_other,
+            "retirement_reasons_detail": dict(retirement_reasons),
         }
 
         self.mission_stats.update(extended_stats)
+
+        # Log summary of characterization pipeline
+        self.logger.info(
+            f"MISSION SUMMARY: {len(self._all_detected_planets)} planets detected"
+        )
+        self.logger.info(
+            f"MISSION SUMMARY: {retired_not_char} planets retired as "
+            f"not characterizable:"
+        )
+        if retired_nc_iwa > 0:
+            self.logger.info(
+                f"  - {retired_nc_iwa} inside char mode IWA (too close to star)"
+            )
+        if retired_nc_owa > 0:
+            self.logger.info(
+                f"  - {retired_nc_owa} outside char mode OWA (too far from star)"
+            )
+        if retired_nc_phot > 0:
+            self.logger.info(
+                f"  - {retired_nc_phot} too faint for spectroscopy (photometric limit)"
+            )
+        if retired_nc_generic > 0:
+            self.logger.info(f"  - {retired_nc_generic} other NC reasons")
+        self.logger.info(
+            f"MISSION SUMMARY: {retired_completed} planets successfully characterized"
+        )
+        self.logger.info(
+            f"MISSION SUMMARY: {retired_max_char_fail} planets retired after "
+            f"max char failures"
+        )
+        self.logger.info(
+            f"MISSION SUMMARY: {retired_max_requeue} planets retired after "
+            f"max requeue attempts"
+        )
 
     def classify_planets(self):
         """This determines the Kopparapu bin of the planet."""
@@ -3863,7 +4279,7 @@ class OrbixScheduler(SurveySimulation):
             )
         else:
             # Exceeded max retries, retire the track
-            self._retire_track(track)
+            self._retire_track(track, reason="max_requeue_attempts")
             self.logger.info(
                 f"REQUEUE: Retiring track ({track.sInd},{track.pInd}) after "
                 f"{self.max_requeue_attempts} failed scheduling attempts"
@@ -4392,6 +4808,33 @@ class OrbixScheduler(SurveySimulation):
         prev_star = None
         star_boundaries = []  # To store rows where star systems change
 
+        # Build status indicators for each planet
+        # Check which planets are completed, retired, or still active
+        def _get_planet_status(sInd, pInd):
+            """Get status indicator for planet label."""
+            key = (sInd, pInd)
+            if hasattr(self, "_completed_planets") and key in self._completed_planets:
+                return "✓"  # Completed characterization
+            if key in self.retired_tracks:
+                track = self.retired_tracks[key]
+                reason = getattr(track, "retirement_reason", "unknown")
+                # Map reasons to short indicators with specific NC sub-types
+                reason_map = {
+                    "not_characterizable": "✗ NC",  # Generic not characterizable
+                    "not_char_iwa": "✗ NC-I",  # Inside IWA (too close)
+                    "not_char_owa": "✗ NC-O",  # Outside OWA (too far)
+                    "not_char_phot": "✗ NC-P",  # Photometric (too faint)
+                    "max_char_failures": "✗ CF",  # Char failures
+                    "max_det_failures": "✗ DF",  # Det failures
+                    "max_requeue_attempts": "✗ RQ",  # Requeue exhausted
+                    "unknown": "✗",
+                }
+                return reason_map.get(reason, "✗")
+            if key in self.planet_tracks:
+                track = self.planet_tracks[key]
+                return f"D{track.det_successes}/C{track.char_successes}"
+            return "?"
+
         # We need to create labels in the same order as the positions (inverted)
         for i, key in enumerate(reversed(sorted_planet_keys)):
             sInd, pInd = key
@@ -4406,7 +4849,7 @@ class OrbixScheduler(SurveySimulation):
 
             a = self.SimulatedUniverse.a[pInd].to_value(u.AU)  # Semi-major axis
             radius = self.SimulatedUniverse.Rp[pInd].to_value(u.earthRad)
-            # Format the label with planet properties
+            # Format the label with planet properties (status shown on right axis)
             label = f"S{sInd} - P{pInd} ({radius:.1f} R⊕, {a:.2f} AU)"
 
             planet_labels.append(label)
@@ -4423,6 +4866,30 @@ class OrbixScheduler(SurveySimulation):
 
         ax.set_yticks(range(len(sorted_planet_keys) + 1))
         ax.set_yticklabels(planet_labels)
+
+        # Add status annotations on the right side of the plot
+        # Create secondary y-axis for status labels
+        ax2 = ax.secondary_yaxis("right")
+        ax2.set_yticks(range(len(sorted_planet_keys) + 1))
+
+        # Build status labels in same order as planet_labels (blind row first)
+        # and count retirement reasons for the summary
+        status_labels = [""]  # Empty for blind row
+        retirement_counts = Counter()
+        for key in reversed(sorted_planet_keys):
+            sInd, pInd = key
+            status = _get_planet_status(sInd, pInd)
+            status_labels.append(status)
+            # Count retirement reasons
+            if key in self.retired_tracks:
+                track = self.retired_tracks[key]
+                reason = getattr(track, "retirement_reason", "unknown")
+                retirement_counts[reason] += 1
+            elif hasattr(self, "_completed_planets") and key in self._completed_planets:
+                retirement_counts["completed"] += 1
+            elif key in self.planet_tracks:
+                retirement_counts["active"] += 1
+        ax2.set_yticklabels(status_labels, fontsize=8)
 
         # Add horizontal lines to visually separate star systems
         for boundary in star_boundaries:
@@ -4548,6 +5015,60 @@ class OrbixScheduler(SurveySimulation):
             location="bottom",
             # loc="upper center",
             # bbox_to_anchor=(0.5, 1.1),
+        )
+
+        # Add a text box with retirement reason summary
+        n_completed = retirement_counts.get("completed", 0)
+        # Sum all NC sub-types
+        n_nc_iwa = retirement_counts.get("not_char_iwa", 0)
+        n_nc_owa = retirement_counts.get("not_char_owa", 0)
+        n_nc_phot = retirement_counts.get("not_char_phot", 0)
+        n_nc_generic = retirement_counts.get("not_characterizable", 0)
+        n_not_char_total = n_nc_iwa + n_nc_owa + n_nc_phot + n_nc_generic
+        n_char_fail = retirement_counts.get("max_char_failures", 0)
+        n_det_fail = retirement_counts.get("max_det_failures", 0)
+        n_requeue = retirement_counts.get("max_requeue_attempts", 0)
+        n_active = retirement_counts.get("active", 0)
+
+        # Build summary text for the status codes
+        summary_lines = [
+            "Status Codes:",
+            f"  ✓ = Characterized ({n_completed})",
+        ]
+        # Show NC breakdown if there are any
+        if n_not_char_total > 0:
+            summary_lines.append(f"  ✗ NC = Not characterizable ({n_not_char_total}):")
+            if n_nc_iwa > 0:
+                summary_lines.append(f"      NC-I = Inside IWA ({n_nc_iwa})")
+            if n_nc_owa > 0:
+                summary_lines.append(f"      NC-O = Outside OWA ({n_nc_owa})")
+            if n_nc_phot > 0:
+                summary_lines.append(f"      NC-P = Too faint ({n_nc_phot})")
+            if n_nc_generic > 0:
+                summary_lines.append(f"      NC = Other ({n_nc_generic})")
+        if n_char_fail > 0:
+            summary_lines.append(f"  ✗ CF = Char failures ({n_char_fail})")
+        if n_det_fail > 0:
+            summary_lines.append(f"  ✗ DF = Det failures ({n_det_fail})")
+        if n_requeue > 0:
+            summary_lines.append(f"  ✗ RQ = Requeue exhausted ({n_requeue})")
+        if n_active > 0:
+            summary_lines.append(f"  D#/C# = Active track ({n_active})")
+
+        summary_text = "\n".join(summary_lines)
+
+        # Add the summary text box in upper right
+        props = dict(boxstyle="round", facecolor="white", alpha=0.9, edgecolor="gray")
+        ax.text(
+            0.99,
+            0.99,
+            summary_text,
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment="top",
+            horizontalalignment="right",
+            bbox=props,
+            family="monospace",
         )
 
         # Add title and labels
