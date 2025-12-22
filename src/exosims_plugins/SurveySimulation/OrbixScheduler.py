@@ -2836,7 +2836,7 @@ class OrbixScheduler(SurveySimulation):
             f"[{char_IWA:.4f}, {char_OWA:.3f}] arcsec"
         )
         self.logger.info(
-            f"MODE CONFIG: IWA ratio (char/det): {char_IWA/det_IWA:.2f}x - "
+            f"MODE CONFIG: IWA ratio (char/det): {char_IWA / det_IWA:.2f}x - "
             f'Planets with WA < {char_IWA:.4f}" cannot be characterized'
         )
 
