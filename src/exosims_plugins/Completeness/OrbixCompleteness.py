@@ -286,7 +286,10 @@ class OrbixCompleteness(BrownCompleteness):
                 Path object for the star ensemble cache file
         """
         ensemble_subdir, base_name, extstr_base = self._get_star_ensemble_subdir(TK, SS)
-        extstr = extstr_base + "sInd: " + str(sInd)
+        # Include star name in hash to prevent cache collisions when target list
+        # changes (e.g., after revise_lists())
+        star_name = SS.TargetList.Name[sInd]
+        extstr = extstr_base + "sInd: " + str(sInd) + "star_name: " + str(star_name)
         ext = hashlib.md5(extstr.encode("utf-8")).hexdigest()
         ensemble_filename = base_name + f"_ensemble_s{sInd}_" + ext
         return ensemble_subdir / f"{ensemble_filename.replace(' ', '')}.ensemble"

@@ -3,6 +3,7 @@
 Basically a full rewrite of the SurveySimulation class.
 """
 
+import csv
 import os
 import time
 import warnings
@@ -244,6 +245,8 @@ class OrbixScheduler(SurveySimulation):
         min_comp_div_obs_time=0.0,
         min_int_time_hr=1,
         n_int_times=100,
+        snr_margin_det=0.0,
+        snr_margin_char=0.0,
         debug_plots=False,
         final_plot=False,
         plot_format="png",
@@ -268,6 +271,8 @@ class OrbixScheduler(SurveySimulation):
         self._outspec["min_comp_div_obs_time"] = min_comp_div_obs_time
         self._outspec["min_int_time_hr"] = min_int_time_hr
         self._outspec["n_int_times"] = n_int_times
+        self._outspec["snr_margin_det"] = snr_margin_det
+        self._outspec["snr_margin_char"] = snr_margin_char
         self._outspec["debug_plots"] = debug_plots
         self._outspec["final_plot"] = final_plot
         self._outspec["plot_format"] = plot_format
@@ -291,6 +296,8 @@ class OrbixScheduler(SurveySimulation):
         self.min_int_time = min_int_time_hr * u.hr
         self.min_int_time_d = self.min_int_time.to_value(u.day)
         self.n_int_times = n_int_times
+        self.snr_margin_det = snr_margin_det
+        self.snr_margin_char = snr_margin_char
         self.debug_plots = debug_plots
         self.final_plot = final_plot
         self.plot_format = plot_format
@@ -472,8 +479,13 @@ class OrbixScheduler(SurveySimulation):
             level="scalar", jit=False, kind="bilinear", E=False, trig=True
         )
         for mode in OS.observingModes:
+            # Use the appropriate SNR margin based on detection mode
+            if "spec" in mode["inst"]["name"]:
+                snr_margin = self.snr_margin_char
+            else:
+                snr_margin = self.snr_margin_det
             self.dMag0s[mode["hex"]] = dMag0_grid(
-                self, mode, int_times, nEZ_range, n_kEZs=3
+                self, mode, int_times, nEZ_range, n_kEZs=3, snr_margin=snr_margin
             )
 
         # Set up orbix completeness
@@ -1427,9 +1439,13 @@ class OrbixScheduler(SurveySimulation):
         # Get the base JEZ for this star and mode
         JEZ0 = self.TargetList.JEZ0[mode["hex"]][track.sInd]
 
+        # Get the planet-specific nEZ and system fbeta
+        nEZ = self.SimulatedUniverse.nEZ[track.pInd]
+        fbeta = self.TargetList.system_fbeta[track.sInd]
+
         # Apply the 1/r^2 scaling using predicted orbital distance
         # This matches how SimulatedUniverse.scale_JEZ works
-        predicted_JEZ = 3 * JEZ0 * (1 / predicted_separation) ** 2
+        predicted_JEZ = JEZ0 * nEZ * (1 / predicted_separation) ** 2 * fbeta
 
         return {
             "predicted_fZ": predicted_fZ,
@@ -2219,6 +2235,7 @@ class OrbixScheduler(SurveySimulation):
 
         if len(all_sInds) == 0:
             self.vprint("No characterizable stars remaining.")
+            breakpoint()
             return None
 
         earliest_available_mjd = np.inf
@@ -4151,6 +4168,9 @@ class OrbixScheduler(SurveySimulation):
 
         self.mission_stats.update(extended_stats)
 
+        # Export observations to CSV for coronagraphoto
+        self.export_observations_csv()
+
         # Log summary of characterization pipeline
         self.logger.info(
             f"MISSION SUMMARY: {len(self._all_detected_planets)} planets detected"
@@ -4184,6 +4204,301 @@ class OrbixScheduler(SurveySimulation):
             f"MISSION SUMMARY: {retired_max_requeue} planets retired after "
             f"max requeue attempts"
         )
+
+    def export_observations_csv(self, filename=None):
+        """Export all observations to a CSV file for use with coronagraphoto.
+
+        Creates a CSV containing all observation data needed to generate
+        coronagraphoto Exposure objects. The CSV format is designed to be
+        compatible with coronagraphoto's requirements while also including
+        additional context from EXOSIMS.
+
+        Args:
+            filename (str, optional):
+                Output filename. If None, defaults to 'observations.csv'
+                in self.plot_dir.
+
+        Returns:
+            str: Path to the generated CSV file.
+        """
+        if filename is None:
+            output_dir = Path(self.plot_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            filename = output_dir / "observations.csv"
+        else:
+            filename = Path(filename)
+
+        TL = self.TargetList
+        SU = self.SimulatedUniverse
+
+        # Define CSV columns
+        # Columns for coronagraphoto Exposure object:
+        #   start_time_jd, exposure_time_s, central_wavelength_nm,
+        #   bandwidth_nm, position_angle_deg
+        # Additional context columns for matching/analysis
+        fieldnames = [
+            # Observation identification
+            "obs_num",
+            "purpose",
+            "obs_type",
+            # Star/target info
+            "star_ind",
+            "star_name",
+            "star_hip_number",
+            "star_dist_pc",
+            "star_L_Lsun",
+            "star_spectral_type",
+            # Timing - for coronagraphoto
+            "start_time_mjd",
+            "start_time_jd",
+            "start_time_year",
+            "exposure_time_d",
+            "exposure_time_s",
+            "visit_num",
+            # Wavelength - for coronagraphoto
+            "central_wavelength_nm",
+            "bandwidth_nm",
+            "bandwidth_frac",
+            # Position angle - for coronagraphoto
+            "position_angle_deg",
+            # Background/noise info
+            "fZ",
+            "nEZ",
+            # Observation results
+            "det_status",
+            "char_status",
+            "SNR",
+            "completeness",
+            # Planet info
+            "plan_inds",
+            "n_planets",
+            "planet_WA_arcsec",
+            "planet_dMag",
+            # Mode info
+            "mode_name",
+            "IWA_arcsec",
+            "OWA_arcsec",
+            # Predicted values (if available)
+            "predicted_fZ",
+            "predicted_WA",
+            "predicted_dMag",
+        ]
+
+        rows = []
+        visit_counts = {}  # Track visit number per star
+
+        for action in self.history:
+            # Skip non-observation actions
+            if action.purpose in ("general_astrophysics", "wait"):
+                continue
+            if action.result is None:
+                continue
+
+            sInd = action.target.sInd if action.target else None
+            if sInd is None:
+                continue
+
+            # Update visit count
+            visit_counts[sInd] = visit_counts.get(sInd, 0) + 1
+            visit_num = visit_counts[sInd]
+
+            # Get observation results
+            result_data = action.result.data if action.result else {}
+            result_meta = action.result.meta if action.result else {}
+
+            # Get mode info
+            mode = action.mode or self.base_det_mode
+
+            # Calculate times
+            start_mjd = action.start
+            start_jd = start_mjd + 2400000.5  # MJD to JD conversion
+            start_time = Time(start_mjd, format="mjd")
+            start_year = start_time.decimalyear
+
+            # Get integration time
+            int_time_d = action.int_time if action.int_time else 0.0
+            int_time_s = int_time_d * 86400.0  # days to seconds
+
+            # Get wavelength info from mode
+            central_wavelength_nm = mode["lam"].to_value(u.nm)
+            bandwidth_nm = mode["deltaLam"].to_value(u.nm)
+            bandwidth_frac = mode["BW"]
+
+            # Position angle (default to 0 if not specified)
+            position_angle_deg = 0.0  # TODO: Extract from observation if available
+
+            # Get star info
+            star_name = TL.Name[sInd] if hasattr(TL, "Name") else f"Star_{sInd}"
+            star_dist_pc = TL.dist[sInd].to_value(u.pc) if hasattr(TL, "dist") else 0.0
+            star_L = TL.L[sInd] if hasattr(TL, "L") else 1.0
+            if "HIP" in star_name:
+                star_hip_number = float(star_name.split(" ")[1])
+            else:
+                # Assume that we're using HPIC
+                hpic_df = self.TargetList.StarCatalog.data
+                star_hip_number = hpic_df.loc[
+                    hpic_df["star_name"] == star_name, "hip_name"
+                ].values[0]
+                star_hip_number = float(star_hip_number)
+            star_spectral_type = TL.Spec[sInd] if hasattr(TL, "Spec") else ""
+
+            # Get background info
+            fZ_val = 0.0
+            nEZ_val = 0.0
+            if action.purpose == "detection":
+                fZ_val = (
+                    result_data.get("det_fZ", 0.0 * self.fZ_unit).to_value(self.fZ_unit)
+                    if result_data.get("det_fZ") is not None
+                    else 0.0
+                )
+            elif action.purpose == "characterization":
+                char_info = result_data.get("char_info", [{}])
+                if char_info:
+                    fZ_val = (
+                        char_info[-1]
+                        .get("char_fZ", 0.0 * self.fZ_unit)
+                        .to_value(self.fZ_unit)
+                        if char_info[-1].get("char_fZ") is not None
+                        else 0.0
+                    )
+
+            # Get planet indices
+            plan_inds = result_meta.get("plan_inds", np.array([]))
+            n_planets = len(plan_inds)
+
+            # Get nEZ for the system (average across planets)
+            if n_planets > 0 and hasattr(SU, "nEZ"):
+                nEZ_val = float(np.mean(SU.nEZ[plan_inds]))
+
+            # Get detection/characterization status
+            det_status = ""
+            char_status = ""
+            snr_vals = ""
+            completeness = 0.0
+
+            if action.purpose == "detection":
+                det_status_arr = result_data.get("det_status", [])
+                det_status = (
+                    ",".join(map(str, det_status_arr))
+                    if len(det_status_arr) > 0
+                    else ""
+                )
+                snr_arr = result_data.get("det_SNR", [])
+                snr_vals = (
+                    ",".join([f"{s:.2f}" for s in snr_arr]) if len(snr_arr) > 0 else ""
+                )
+                completeness = result_data.get("det_comp", 0.0)
+            elif action.purpose == "characterization":
+                char_info = result_data.get("char_info", [{}])
+                if char_info:
+                    char_status_arr = char_info[-1].get("char_status", [])
+                    char_status = (
+                        ",".join(map(str, char_status_arr))
+                        if len(char_status_arr) > 0
+                        else ""
+                    )
+                    snr_arr = char_info[-1].get("char_SNR", [])
+                    snr_vals = (
+                        ",".join([f"{s:.2f}" for s in snr_arr])
+                        if len(snr_arr) > 0
+                        else ""
+                    )
+                    completeness = char_info[-1].get("char_comp", 0.0)
+
+            # Get planet WA and dMag
+            planet_WA = ""
+            planet_dMag = ""
+            if action.purpose == "detection":
+                wa_vals = result_data.get("det_WA", [])
+                dmag_vals = result_data.get("det_dMag", [])
+                if wa_vals:
+                    planet_WA = ",".join([f"{w:.4f}" for w in wa_vals])
+                if dmag_vals:
+                    planet_dMag = ",".join([f"{d:.2f}" for d in dmag_vals])
+            elif action.purpose == "characterization":
+                char_info = result_data.get("char_info", [{}])
+                if char_info:
+                    params = char_info[-1].get("char_params", {})
+                    if "WA" in params:
+                        wa = params["WA"]
+                        if hasattr(wa, "to_value"):
+                            wa = wa.to_value(u.arcsec)
+                        if hasattr(wa, "__iter__"):
+                            planet_WA = ",".join([f"{w:.4f}" for w in wa])
+                        else:
+                            planet_WA = f"{wa:.4f}"
+                    if "dMag" in params:
+                        dmag = params["dMag"]
+                        if hasattr(dmag, "__iter__"):
+                            planet_dMag = ",".join([f"{d:.2f}" for d in dmag])
+                        else:
+                            planet_dMag = f"{dmag:.2f}"
+
+            # Get predicted values if available
+            predicted = action.predicted or {}
+            predicted_fZ = predicted.get("predicted_fZ", "")
+            predicted_WA = predicted.get("predicted_WA", "")
+            predicted_dMag = predicted.get("predicted_dMag", "")
+
+            # Mode info
+            mode_name = mode.get("syst", {}).get("name", "unknown")
+            IWA_arcsec = mode["IWA"].to_value(u.arcsec)
+            OWA_arcsec = mode["OWA"].to_value(u.arcsec)
+
+            # Observation type
+            obs_type = "blind" if action.blind else "followup"
+
+            row = {
+                "obs_num": result_meta.get("ObsNum", 0),
+                "purpose": action.purpose,
+                "obs_type": obs_type,
+                "star_ind": sInd,
+                "star_name": star_name,
+                "star_hip_number": star_hip_number,
+                "star_dist_pc": f"{star_dist_pc:.4f}",
+                "star_L_Lsun": f"{star_L:.4f}",
+                "star_spectral_type": star_spectral_type,
+                "start_time_mjd": f"{start_mjd:.6f}",
+                "start_time_jd": f"{start_jd:.6f}",
+                "start_time_year": f"{start_year:.6f}",
+                "exposure_time_d": f"{int_time_d:.6f}",
+                "exposure_time_s": f"{int_time_s:.2f}",
+                "visit_num": visit_num,
+                "central_wavelength_nm": f"{central_wavelength_nm:.2f}",
+                "bandwidth_nm": f"{bandwidth_nm:.2f}",
+                "bandwidth_frac": f"{bandwidth_frac:.4f}",
+                "position_angle_deg": f"{position_angle_deg:.2f}",
+                "fZ": f"{fZ_val:.6f}",
+                "nEZ": f"{nEZ_val:.2f}",
+                "det_status": det_status,
+                "char_status": char_status,
+                "SNR": snr_vals,
+                "completeness": f"{completeness:.6f}",
+                "plan_inds": ",".join(map(str, plan_inds)) if n_planets > 0 else "",
+                "n_planets": n_planets,
+                "planet_WA_arcsec": planet_WA,
+                "planet_dMag": planet_dMag,
+                "mode_name": mode_name,
+                "IWA_arcsec": f"{IWA_arcsec:.6f}",
+                "OWA_arcsec": f"{OWA_arcsec:.4f}",
+                "predicted_fZ": f"{predicted_fZ:.6f}" if predicted_fZ != "" else "",
+                "predicted_WA": f"{predicted_WA:.6f}" if predicted_WA != "" else "",
+                "predicted_dMag": (
+                    f"{predicted_dMag:.2f}" if predicted_dMag != "" else ""
+                ),
+            }
+            rows.append(row)
+
+        # Write CSV
+        with open(filename, "w", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        self.logger.info(f"Exported {len(rows)} observations to {filename}")
+        self.vprint(f"Observations CSV saved to {filename}")
+
+        return str(filename)
 
     def classify_planets(self):
         """This determines the Kopparapu bin of the planet."""
