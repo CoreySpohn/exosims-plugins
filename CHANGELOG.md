@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/CoreySpohn/exosims-plugins/compare/v1.0.2...v1.1.0) (2025-12-20)
+
+
+### Features
+
+* Moving to completeness/observing time instead of completeness/int time. Adding additional logging information ([f1f28ba](https://github.com/CoreySpohn/exosims-plugins/commit/f1f28ba30be7c4d448e9cb1b62e9b45a7b763266))
+
 ## [1.0.2](https://github.com/CoreySpohn/exosims-plugins/compare/v1.0.1...v1.0.2) (2025-12-16)
 
 
