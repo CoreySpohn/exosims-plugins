@@ -970,6 +970,340 @@ class AYOSimulation2(SurveySimulation):
 
         self.vprint("Aperture pre-computation complete.")
 
+    def calc_count_rates(
+        self,
+        sep_lod,
+        dMag,
+        dist_pc,
+        wavelength_um=None,
+        fZ_override=None,
+        aperture_radius_lod=0.7,
+        sInd=None,
+    ):
+        """Calculate all count rate components for exposure time calculation.
+
+        This method computes all the individual count rate contributions used in
+        the AYO exposure time formula. It is designed for easy debugging and
+        comparison against AYO reference values.
+
+        Args:
+            sep_lod: Separation in λ/D units (scalar or array)
+            dMag: Delta magnitude (scalar or array, same shape as sep_lod)
+            dist_pc: Distance to star in parsecs
+            wavelength_um: Observation wavelength in microns (optional, uses det_params default)
+            fZ_override: Optional zodiacal light override (1/arcsec²)
+            aperture_radius_lod: Photometric aperture radius in λ/D (default 0.7)
+            sInd: Star index for initialization (optional, uses 0 if not set)
+
+        Returns:
+            dict with all count rate components and intermediate values:
+                - CRp: Planet count rate (electrons/s)
+                - CRbs: Stellar leakage count rate
+                - CRbz: Zodi background count rate
+                - CRbez: Exozodi background count rate
+                - CRbd: Detector noise count rate
+                - CRnf: Noise floor count rate
+                - CRb: Total background count rate (CRbs + CRbz + CRbez + CRbd)
+                - throughput: Core throughput (T_core)
+                - omega: Photometric aperture solid angle in (λ/D)²
+                - Istar: Stellar intensity at separation
+                - SkyTrans: Sky transmission at separation
+                - noise_floor_density: Noise floor contrast at separation
+                - flux_factor: Common flux factor for calculations
+                - F0: Zero-magnitude flux
+                - Fs_over_F0: Stellar flux ratio (10^(-0.4*mag))
+                - Fp_over_Fs: Planet/star flux ratio
+                - lod_arcsec: λ/D in arcseconds
+                - sep_arcsec: Separation in arcseconds
+                - SNR: Target signal-to-noise ratio
+                - params: Dictionary of all parameters used
+        """
+        # Load coronagraph
+        coro = self._load_yippy_coronagraph()
+
+        # Ensure pyEDITH observatory is initialized
+        if not self._observatory_initialized:
+            self._init_star_for_vectorized_etc(sInd if sInd is not None else 0)
+
+        # Get pyEDITH objects
+        scene = self._base_scene
+        obs = self._base_observation
+        observatory = self._pyedith_observatory
+
+        # Get observation parameters
+        params = self.det_params
+        if wavelength_um is None:
+            wavelength_um = params.get("wavelength", 0.5)
+            if hasattr(wavelength_um, "__len__"):
+                wavelength_um = float(np.mean(wavelength_um))
+        diameter_m = params.get("diameter", 6.0)
+
+        # λ/D in arcsec
+        lod_arcsec = (wavelength_um * 1e-6 / diameter_m) * 206265.0
+        sep_arcsec = sep_lod * lod_arcsec
+
+        # Ensure arrays
+        sep_lod = np.atleast_1d(sep_lod)
+        dMag = np.atleast_1d(dMag)
+        shape = sep_lod.shape
+        sep_flat = sep_lod.flatten()
+
+        # Planet flux ratio from dMag
+        Fp_over_Fs = 10 ** (-0.4 * dMag)
+
+        # Get fluxes from pyEDITH scene
+        F0 = float(scene.F0[0].value) if hasattr(scene, "F0") else 1e10
+        Fs_over_F0 = (
+            float(scene.Fs_over_F0[0].value) if hasattr(scene, "Fs_over_F0") else 1.0
+        )
+
+        # Zodiacal light
+        if fZ_override is not None:
+            Fzodi = (
+                float(fZ_override.value)
+                if hasattr(fZ_override, "value")
+                else float(fZ_override)
+            )
+        else:
+            Fzodi = (
+                float(scene.Fzodi_list[0].value)
+                if hasattr(scene, "Fzodi_list")
+                else 1e-8
+            )
+
+        # Observatory parameters
+        area_cm2 = float(observatory.telescope.Area.to(u.cm**2).value)
+        total_throughput = float(observatory.total_throughput[0].value)
+
+        if hasattr(obs, "delta_wavelength") and obs.delta_wavelength is not None:
+            dlambda_nm = float(obs.delta_wavelength[0].to(u.nm).value)
+        else:
+            wavelength_nm = params.get("wavelength", 500) * 1e3
+            if hasattr(wavelength_nm, "__len__"):
+                dlambda_nm = float(wavelength_nm[-1] - wavelength_nm[0])
+            else:
+                dlambda_nm = float(wavelength_nm * 0.2)
+
+        nchannels = observatory.coronagraph.nchannels
+        pixscale = float(observatory.coronagraph.pixscale.value)
+
+        # Observation parameters
+        SNR = float(np.mean(obs.SNR.value)) if hasattr(obs.SNR, "value") else 7.0
+        noisefloor_PPF = params.get("noisefloor_PPF", 30.0)
+
+        # Detector params
+        det_DC = params.get("det_DC", 0.0003)
+        det_RN = params.get("det_RN", 0.0)
+        det_tread = params.get("det_tread", 10.0)
+        det_CIC = params.get("det_CIC", 0.0013)
+        npix_multiplier = params.get("npix_multiplier", 1.0)
+        QE = float(observatory.detector.QE[0].value)
+        dQE = float(observatory.detector.dQE[0].value)
+
+        # Flux factor common to all calculations
+        flux_factor = (
+            F0 * Fs_over_F0 * area_cm2 * total_throughput * dlambda_nm * nchannels
+        )
+
+        # Exozodi setup
+        nexozodis = params.get("nexozodis", 3.0)
+        F_exozodi = Fzodi * nexozodis
+        WA_au = sep_arcsec * dist_pc
+        WA_au_safe = np.maximum(WA_au, 0.01)
+
+        # Coronagraph performance at separation
+        Istar = np.maximum(coro.core_intensity_interp(sep_flat), 1e-20).reshape(shape)
+        SkyTrans = coro.occ_trans_interp(sep_flat).reshape(shape)
+
+        # Get throughput for the specified aperture
+        if (
+            hasattr(self, "_aperture_interpolators")
+            and self._aperture_interpolators is not None
+            and aperture_radius_lod in self._aperture_interpolators
+        ):
+            data = self._aperture_interpolators[aperture_radius_lod]
+            throughput = np.clip(data["throughput"](sep_flat), 0, 1).reshape(shape)
+            omega = np.full(shape, data["omega"])
+        else:
+            # Use yippy's default interpolators
+            throughput = np.clip(coro.throughput_interp(sep_flat), 0, 1).reshape(shape)
+            omega = np.full(shape, np.pi * aperture_radius_lod**2)
+
+        # Noise floor
+        if (
+            hasattr(self, "_noise_floor_interp")
+            and self._noise_floor_interp is not None
+        ):
+            noise_floor_density = np.maximum(
+                self._noise_floor_interp(sep_flat), 1e-15
+            ).reshape(shape)
+            use_csv_noisefloor = True
+        else:
+            ppf = 30.0
+            noise_floor_density = np.maximum(
+                coro.noise_floor(sep_flat, ppf=ppf), 1e-15
+            ).reshape(shape)
+            use_csv_noisefloor = False
+
+        # === Count Rate Calculations ===
+
+        # Planet count rate: CRp = flux_factor × Fp/Fs × throughput
+        CRp = flux_factor * Fp_over_Fs * throughput
+
+        # Stellar leakage: CRbs = flux_factor × Istar × omega
+        CRbs = flux_factor * Istar * omega
+
+        # Zodi background
+        omega_arcsec2 = omega * (lod_arcsec**2)
+        zodi_throughput = SkyTrans * QE * dQE
+        CRbz = (
+            Fzodi
+            * omega_arcsec2
+            * area_cm2
+            * zodi_throughput
+            * dlambda_nm
+            * nchannels
+        )
+
+        # Exozodi background
+        CRbez = (
+            F_exozodi
+            * omega_arcsec2
+            * area_cm2
+            * zodi_throughput
+            * dlambda_nm
+            * nchannels
+            / (WA_au_safe**2)
+        )
+
+        # Detector noise
+        npix = npix_multiplier * omega / (pixscale**2) * nchannels
+        t_photon_count = 1.0 / (6.73 * np.maximum(CRp / npix, 1e-10))
+        CRbd = (det_DC + det_RN**2 / det_tread + det_CIC / t_photon_count) * npix
+
+        # Noise floor
+        if use_csv_noisefloor:
+            CRnf = SNR * flux_factor * noise_floor_density * omega
+        else:
+            CRnf = SNR * flux_factor * (noise_floor_density / noisefloor_PPF) * omega
+
+        # Total background
+        CRb = CRbs + CRbz + CRbez + CRbd
+
+        # Build params dict for reference
+        all_params = {
+            "wavelength_um": wavelength_um,
+            "diameter_m": diameter_m,
+            "lod_arcsec": lod_arcsec,
+            "area_cm2": area_cm2,
+            "total_throughput": total_throughput,
+            "dlambda_nm": dlambda_nm,
+            "nchannels": nchannels,
+            "pixscale": pixscale,
+            "SNR": SNR,
+            "noisefloor_PPF": noisefloor_PPF,
+            "det_DC": det_DC,
+            "det_RN": det_RN,
+            "det_tread": det_tread,
+            "det_CIC": det_CIC,
+            "npix_multiplier": npix_multiplier,
+            "QE": QE,
+            "dQE": dQE,
+            "nexozodis": nexozodis,
+            "Fzodi": Fzodi,
+            "F_exozodi": F_exozodi,
+            "aperture_radius_lod": aperture_radius_lod,
+            "use_csv_noisefloor": use_csv_noisefloor,
+        }
+
+        return {
+            # Count rates
+            "CRp": CRp,
+            "CRbs": CRbs,
+            "CRbz": CRbz,
+            "CRbez": CRbez,
+            "CRbd": CRbd,
+            "CRnf": CRnf,
+            "CRb": CRb,
+            # Intermediate values
+            "throughput": throughput,
+            "omega": omega,
+            "omega_arcsec2": omega_arcsec2,
+            "Istar": Istar,
+            "SkyTrans": SkyTrans,
+            "noise_floor_density": noise_floor_density,
+            "npix": npix,
+            # Flux values
+            "flux_factor": flux_factor,
+            "F0": F0,
+            "Fs_over_F0": Fs_over_F0,
+            "Fp_over_Fs": Fp_over_Fs,
+            # Geometry
+            "lod_arcsec": lod_arcsec,
+            "sep_lod": sep_lod,
+            "sep_arcsec": sep_arcsec,
+            "dist_pc": dist_pc,
+            "WA_au": WA_au,
+            # Observation
+            "SNR": SNR,
+            "params": all_params,
+        }
+
+    def calc_inttime(self, count_rates, toverhead_multi=None, toverhead_fixed=None):
+        """Calculate integration time from count rates.
+
+        Uses the standard AYO exposure time formula:
+            cp = (CRp + 2*CRb) / (CRp² - CRnf²)
+            t = SNR² × cp × toverhead_multi + toverhead_fixed
+
+        Args:
+            count_rates: Dictionary from calc_count_rates()
+            toverhead_multi: Overhead multiplier (optional, uses observatory default)
+            toverhead_fixed: Fixed overhead in seconds (optional, uses observatory default)
+
+        Returns:
+            dict with:
+                - inttime_sec: Integration time in seconds
+                - inttime_days: Integration time in days
+                - cp: Noise coefficient
+                - numerator: CRp + 2*CRb
+                - denominator: CRp² - CRnf²
+        """
+        CRp = count_rates["CRp"]
+        CRb = count_rates["CRb"]
+        CRnf = count_rates["CRnf"]
+        SNR = count_rates["SNR"]
+
+        # Get overhead values from observatory if not provided
+        if toverhead_multi is None:
+            toverhead_multi = float(self._pyedith_observatory.telescope.toverhead_multi)
+        if toverhead_fixed is None:
+            toverhead_fixed = float(
+                self._pyedith_observatory.telescope.toverhead_fixed.to(u.s).value
+            )
+
+        # Exposure time calculation
+        numerator = CRp + 2 * CRb
+        denominator = CRp**2 - CRnf**2
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            cp = numerator / denominator
+            inttime_sec = SNR**2 * cp * toverhead_multi + toverhead_fixed
+
+            # Filter invalid values
+            inttime_sec = np.where(denominator > 0, inttime_sec, np.inf)
+            inttime_sec = np.where(inttime_sec > 0, inttime_sec, np.inf)
+
+        return {
+            "inttime_sec": inttime_sec,
+            "inttime_days": inttime_sec / 86400.0,
+            "cp": cp,
+            "numerator": numerator,
+            "denominator": denominator,
+            "toverhead_multi": toverhead_multi,
+            "toverhead_fixed": toverhead_fixed,
+        }
+
     def _calc_inttime_vectorized(
         self, sInd, dMag_grid, WA_grid, fZ_override=None, wavelength_override=None
     ):
