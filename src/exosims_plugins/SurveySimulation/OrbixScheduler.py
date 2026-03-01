@@ -11,7 +11,7 @@ from bisect import insort
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import astropy.constants as const
 import astropy.units as u
@@ -35,9 +35,9 @@ class Target:
 
     kind: str  # "star", "planet", "reference star"
     sInd: int
-    pInd: Optional[int] = None
-    revisitNumber: Optional[int] = None
-    extra: Optional[dict] = None
+    pInd: int | None = None
+    revisitNumber: int | None = None
+    extra: dict | None = None
 
     @classmethod
     def star(cls, sInd):
@@ -118,16 +118,16 @@ class ScheduleAction:
     # planning information
     purpose: Literal["detection", "characterization", "wait"]
     # Target/observation information
-    target: Optional[Any] = None
-    mode: Optional[dict] = None
-    int_time: Optional[float] = None
+    target: Any | None = None
+    mode: dict | None = None
+    int_time: float | None = None
     # Whether we're doing a blind detection
     blind: bool = False
     comp: float = 0
     pdet: float = 0
-    result: Optional[ObservationResult] = None
+    result: ObservationResult | None = None
     # Predicted values for debugging
-    predicted: Optional[dict] = None
+    predicted: dict | None = None
 
     def __post_init__(self):
         """Fill derived attributes after dataclass sets the fields."""
@@ -3238,10 +3238,8 @@ class OrbixScheduler(SurveySimulation):
 
         # Observation time stats with percentage
         lines.append(
-            (
-                f"Observation time: {stats['used_time']:.2f}/{stats['total_time']:.2f} "
-                f"days used ({stats['percent_used']:.1f}%)"
-            )
+            f"Observation time: {stats['used_time']:.2f}/{stats['total_time']:.2f} "
+            f"days used ({stats['percent_used']:.1f}%)"
         )
         obs_year = self.TimeKeeping.currentTimeAbs.decimalyear
         end_time = self.TimeKeeping.missionFinishAbs.decimalyear
@@ -3488,10 +3486,8 @@ class OrbixScheduler(SurveySimulation):
             ax0.set_xlabel("Separation [arcsec]")
             ax0.set_ylabel("$\\Delta$mag")
             ax0.set_title(
-                (
-                    f"Planet {pInd}{stage_info} - pdet: {float(_pdet):.2f}"
-                    f" - SNR: {filtered_SNR[i]:.2f}"
-                )
+                f"Planet {pInd}{stage_info} - pdet: {float(_pdet):.2f}"
+                f" - SNR: {filtered_SNR[i]:.2f}"
             )
             ax0.set_xlim(0, 0.25)
             ax0.set_ylim(15, 40)
