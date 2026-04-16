@@ -364,18 +364,18 @@ class PyEDITHSimulation(SurveySimulation):
 
         # Create orbix Planets object
         planets = Planets(
-            Ms=Ms_jnp,
-            dist=dist_jnp,
-            a=a_jnp,
+            Ms_kg=Ms_jnp,
+            dist_pc=dist_jnp,
+            a_AU=a_jnp,
             e=e_jnp,
-            W=W_jnp,
-            i=i_jnp,
-            w=w_jnp,
-            M0=M0_jnp,
-            t0=t0_jnp,
-            Mp=Mp_jnp,
-            Rp=Rp_jnp,
-            p=p_jnp,
+            W_rad=W_jnp,
+            i_rad=i_jnp,
+            w_rad=w_jnp,
+            M0_rad=M0_jnp,
+            t0_d=t0_jnp,
+            Mp_Mearth=Mp_jnp,
+            Rp_Rearth=Rp_jnp,
+            Ag=p_jnp,
         )
 
         return planets
@@ -398,7 +398,7 @@ class PyEDITHSimulation(SurveySimulation):
         solver = get_grid_solver(E=False, trig=True)
 
         # Get orbital periods (T is in days)
-        T = np.array(planets.T)
+        T = np.array(planets.T_d)
         max_T = np.max(T)
 
         # Sample times uniformly over one orbital period

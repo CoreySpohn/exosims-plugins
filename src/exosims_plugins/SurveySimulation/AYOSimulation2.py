@@ -446,18 +446,18 @@ class AYOSimulation2(SurveySimulation):
 
         # Create orbix Planets object
         planets = Planets(
-            Ms=Ms_jnp,
-            dist=dist_jnp,
-            a=a_jnp,
+            Ms_kg=Ms_jnp,
+            dist_pc=dist_jnp,
+            a_AU=a_jnp,
             e=e_jnp,
-            W=W_jnp,
-            i=i_jnp,
-            w=w_jnp,
-            M0=M0_jnp,
-            t0=t0_jnp,
-            Mp=Mp_jnp,
-            Rp=Rp_jnp,
-            p=p_jnp,
+            W_rad=W_jnp,
+            i_rad=i_jnp,
+            w_rad=w_jnp,
+            M0_rad=M0_jnp,
+            t0_d=t0_jnp,
+            Mp_Mearth=Mp_jnp,
+            Rp_Rearth=Rp_jnp,
+            Ag=p_jnp,
         )
 
         return planets
@@ -480,9 +480,9 @@ class AYOSimulation2(SurveySimulation):
         M_grid = jnp.linspace(0, 2 * jnp.pi, n_phases)
 
         # Get orbital parameters
-        n_arr = np.array(planets.n)  # Mean motion [n_orbits]
-        M0_arr = np.array(planets.M0)  # Initial mean anomaly [n_orbits]
-        t0_arr = np.array(planets.t0)  # Epoch [n_orbits]
+        n_arr = np.array(planets.n_radpd)  # Mean motion [n_orbits]
+        M0_arr = np.array(planets.M0_rad)  # Initial mean anomaly [n_orbits]
+        t0_arr = np.array(planets.t0_d)  # Epoch [n_orbits]
         n_orbits = len(n_arr)
 
         # Calculate times to reach each Mean Anomaly for each orbit
@@ -1784,9 +1784,9 @@ class AYOSimulation2(SurveySimulation):
 
         # Calculate current Mean Anomaly for all orbits at obs_time_days
         # M(t) = n * (t - t0) + M0
-        n_arr = np.array(planets.n)  # Mean motion [n_orbits]
-        M0_arr = np.array(planets.M0)  # Initial mean anomaly [n_orbits]
-        t0_arr = np.array(planets.t0)  # Epoch [n_orbits]
+        n_arr = np.array(planets.n_radpd)  # Mean motion [n_orbits]
+        M0_arr = np.array(planets.M0_rad)  # Initial mean anomaly [n_orbits]
+        t0_arr = np.array(planets.t0_d)  # Epoch [n_orbits]
 
         M_now = n_arr * (obs_time_days - t0_arr) + M0_arr
 

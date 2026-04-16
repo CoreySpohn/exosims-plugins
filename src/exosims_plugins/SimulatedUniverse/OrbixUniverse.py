@@ -96,5 +96,18 @@ class OrbixUniverse(DulzPlavchanUniverseEarthsOnly):
         # _t0 = jnp.full(norb, 0)
         # _M0 = jnp.full(norb, self.M0[pInd].to_value(u.rad))
 
-        _planets = Planets(_Ms, _dist, _a, _e, _W, _i, _w, _M0, _t0, _Mp, _Rp, _p)
+        _planets = Planets(
+            Ms_kg=_Ms,
+            dist_pc=_dist,
+            a_AU=_a,
+            e=_e,
+            W_rad=_W,
+            i_rad=_i,
+            w_rad=_w,
+            M0_rad=_M0,
+            t0_d=_t0,
+            Mp_Mearth=_Mp,
+            Rp_Rearth=_Rp,
+            Ag=_p,
+        )
         self.orbix_planets[pInd] = _planets
