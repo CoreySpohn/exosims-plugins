@@ -6,7 +6,8 @@ import numpy as np
 from EXOSIMS.SimulatedUniverse.DulzPlavchanUniverseEarthsOnly import (
     DulzPlavchanUniverseEarthsOnly,
 )
-from orbix.system import Planets
+
+from exosims_plugins.planets import Planets
 
 
 class OrbixUniverse(DulzPlavchanUniverseEarthsOnly):

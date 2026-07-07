@@ -10,11 +10,11 @@ import numpy as np
 from astropy.time import Time
 from EXOSIMS.Completeness.BrownCompleteness import BrownCompleteness
 from EXOSIMS.util.atomic_io import atomic_pickle_dump, robust_pickle_load
-from hwoutils.constants import Msun2kg, rad2arcsec
-from orbix.system import Planets
+from hwoutils.constants import Mearth2kg, Msun2kg, Rearth2AU, rad2arcsec
 from tqdm import tqdm
 
 from exosims_plugins.dmag0 import gen_dMag0_hex
+from exosims_plugins.planets import Planets
 
 
 @dataclass
@@ -111,18 +111,18 @@ class OrbixCompleteness(BrownCompleteness):
         """
         # Save Planets object parameters
         planets_data = {
-            "Ms": np.array(self._planets.Ms),
-            "dist": np.array(self._planets.dist),
-            "a": np.array(self._planets.a),
+            "Ms_kg": np.array(self._planets.Ms_kg),
+            "dist_pc": np.array(self._planets.dist_pc),
+            "a_AU": np.array(self._planets.a_AU),
             "e": np.array(self._planets.e),
-            "W": np.array(self._planets.W),
-            "i": np.array(self._planets.i),
-            "w": np.array(self._planets.w),
-            "M0": np.array(self._planets.M0),
-            "t0": np.array(self._planets.t0),
-            "Mp": np.array(self._planets.Mp),
-            "Rp": np.array(self._planets.Rp),
-            "p": np.array(self._planets.p),
+            "W_rad": np.array(self._planets.W_rad),
+            "i_rad": np.array(self._planets.i_rad),
+            "w_rad": np.array(self._planets.w_rad),
+            "M0_rad": np.array(self._planets.M0_rad),
+            "t0_d": np.array(self._planets.t0_d),
+            "Mp_Mearth": np.array(self._planets.Mp_kg / Mearth2kg),
+            "Rp_Rearth": np.array(self._planets.Rp_AU / Rearth2AU),
+            "Ag": np.array(self._planets.Ag),
         }
 
         atomic_pickle_dump(planets_data, str(planets_path))
@@ -158,18 +158,7 @@ class OrbixCompleteness(BrownCompleteness):
 
             # Reconstruct Planets object
             self._planets = Planets(
-                jnp.array(planets_data["Ms"]),
-                jnp.array(planets_data["dist"]),
-                jnp.array(planets_data["a"]),
-                jnp.array(planets_data["e"]),
-                jnp.array(planets_data["W"]),
-                jnp.array(planets_data["i"]),
-                jnp.array(planets_data["w"]),
-                jnp.array(planets_data["M0"]),
-                jnp.array(planets_data["t0"]),
-                jnp.array(planets_data["Mp"]),
-                jnp.array(planets_data["Rp"]),
-                jnp.array(planets_data["p"]),
+                **{k: jnp.asarray(v) for k, v in planets_data.items()}
             )
 
             # Load orbital data
