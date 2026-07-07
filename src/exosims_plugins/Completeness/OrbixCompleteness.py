@@ -10,10 +10,11 @@ import numpy as np
 from astropy.time import Time
 from EXOSIMS.Completeness.BrownCompleteness import BrownCompleteness
 from EXOSIMS.util.atomic_io import atomic_pickle_dump, robust_pickle_load
-from orbix.constants import Msun2kg, rad2arcsec
-from orbix.integrations.exosims.dMag0 import gen_dMag0_hex
+from hwoutils.constants import Msun2kg, rad2arcsec
 from orbix.system import Planets
 from tqdm import tqdm
+
+from exosims_plugins.dmag0 import gen_dMag0_hex
 
 
 @dataclass
@@ -27,7 +28,7 @@ class StarEnsemble:
     n_orbits: int
     # number of times we've failed to detect a planet around this star
     n_failures: int = 0
-    # mjd of scheduled follow‑up
+    # mjd of scheduled follow-up
     next_available_time: float | None = None
     # fraction of remaining orbits that are valid
     f_valid: float = 1.0
@@ -72,7 +73,7 @@ class OrbixCompleteness(BrownCompleteness):
                 and (att != "cachedir")
                 and (att != "_outspec")
             ):
-                extstr += "%s: " % att + str(getattr(self.PlanetPopulation, att))
+                extstr += f"{att}: " + str(getattr(self.PlanetPopulation, att))
         extstr += "missionStart: " + str(mission_start)
         extstr += "missionLife_d: " + str(mission_life_d)
         ext = hashlib.md5(extstr.encode("utf-8")).hexdigest()
@@ -135,8 +136,8 @@ class OrbixCompleteness(BrownCompleteness):
 
         atomic_pickle_dump(orbits_data, str(orbits_path))
 
-        self.vprint("Orbix planets object stored in %r" % planets_path)
-        self.vprint("Orbix orbital data stored in %r" % orbits_path)
+        self.vprint(f"Orbix planets object stored in {planets_path!r}")
+        self.vprint(f"Orbix orbital data stored in {orbits_path!r}")
 
     def load_orbix_cache(self, planets_path, orbits_path):
         """Load the planets object and orbital data from cache files.
@@ -178,8 +179,8 @@ class OrbixCompleteness(BrownCompleteness):
             self.dMag = orbits_data["dMag"]
             self.comp_times = jnp.array(orbits_data["comp_times"])
 
-            self.vprint('Loading cached orbix planets from "%s".' % planets_path)
-            self.vprint('Loading cached orbix orbits from "%s".' % orbits_path)
+            self.vprint(f'Loading cached orbix planets from "{planets_path}".')
+            self.vprint(f'Loading cached orbix orbits from "{orbits_path}".')
 
             return True
 
@@ -250,7 +251,7 @@ class OrbixCompleteness(BrownCompleteness):
                 and (att != "cachedir")
                 and (att != "_outspec")
             ):
-                extstr += "%s: " % att + str(getattr(self.PlanetPopulation, att))
+                extstr += f"{att}: " + str(getattr(self.PlanetPopulation, att))
         extstr += "missionStart: " + str(mission_start)
         extstr += "missionLife_d: " + str(mission_life_d)
         char_mode = SS.base_char_mode

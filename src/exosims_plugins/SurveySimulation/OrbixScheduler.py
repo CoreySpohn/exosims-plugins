@@ -23,8 +23,9 @@ from EXOSIMS.Prototypes.SurveySimulation import SurveySimulation
 from intervaltree import Interval, IntervalTree
 from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.patches import Patch
-from orbix.integrations.exosims import dMag0_grid
 from orbix.kepler.shortcuts import get_grid_solver
+
+from exosims_plugins.dmag0 import dMag0_grid
 
 warnings.filterwarnings("ignore", category=UserWarning, module="erfa")
 
@@ -60,7 +61,7 @@ class ObservationResult:
     data: dict[str, Any]
     meta: dict[str, Any] = field(default_factory=dict)
 
-    # ---- DRM serialization (one public entry‑point) ----------------
+    # ---- DRM serialization (one public entry-point) ----------------
     def to_drm(self):
         """Convert the observation result to a DRM."""
         if self.meta.get("purpose") == "detection":
@@ -178,7 +179,7 @@ class Epoch:
     # ------------------------------------------------------------------
     def __post_init__(self):
         """Fill derived attributes after dataclass sets the fields."""
-        # same length as start_times_mjd but in mission‑elapsed days
+        # same length as start_times_mjd but in mission-elapsed days
 
         # scalar "current time" for each mode
         self.now_det = self.now_norm + self.det_oh
@@ -234,7 +235,7 @@ class OrbixScheduler(SurveySimulation):
     def __init__(
         self,
         n_det_remove=3,
-        err_progression=[0.2, 0.1, 0.025],
+        err_progression=None,
         followup_wait_d=15,
         followup_horizon_d=500,
         pdet_threshold=0.75,
@@ -256,6 +257,8 @@ class OrbixScheduler(SurveySimulation):
         **kwargs,
     ):
         """Initialize the OrbixScheduler."""
+        if err_progression is None:
+            err_progression = [0.2, 0.1, 0.025]
         super().__init__(*args, **kwargs)
 
         # Add all parameters to _outspec for proper reset functionality
@@ -574,7 +577,7 @@ class OrbixScheduler(SurveySimulation):
         dtsim = (time.time() - t0) * u.s
         log_end = (
             "Mission complete: no more time available.\n"
-            + "Simulation duration: %s.\n" % dtsim.astype("int")
+            + "Simulation duration: {}.\n".format(dtsim.astype("int"))
             + "Results stored in SurveySimulation.DRM (Design Reference Mission)."
         )
         self.logger.info(log_end)
@@ -944,7 +947,7 @@ class OrbixScheduler(SurveySimulation):
         char_status = action.result.data["char_info"][-1]["char_status"]
         plan_inds = action.result.meta["plan_inds"]
 
-        for pInd, status in zip(plan_inds, char_status):
+        for pInd, status in zip(plan_inds, char_status, strict=False):
             key = (sInd, int(pInd))
             if key not in self.planet_tracks:
                 continue
@@ -1061,16 +1064,16 @@ class OrbixScheduler(SurveySimulation):
         else:
             # Standard thresholds for detection
             horizon_multipliers = [1, 3, 5, 10]
-        t_start, int_time, max_pdet = None, None, 0
+        t_start, int_time, _max_pdet = None, None, 0
         predicted_values = None
 
         # Try each threshold until we find a valid observation or exhaust all options
         for threshold_multiplier, horizon_multiplier in zip(
-            threshold_multipliers, horizon_multipliers
+            threshold_multipliers, horizon_multipliers, strict=False
         ):
             current_threshold = self.pdet_threshold * threshold_multiplier
             current_horizon = self.followup_horizon_d * horizon_multiplier
-            t_start, int_time, max_pdet, pdet_val, predicted_values = (
+            t_start, int_time, _max_pdet, pdet_val, predicted_values = (
                 self._calc_optimal_followup(
                     track, current_threshold, mode, current_horizon
                 )
@@ -1468,7 +1471,7 @@ class OrbixScheduler(SurveySimulation):
 
         to_requeue: list[ScheduleAction] = []
         for iv in overlaps:
-            purpose, tgt = iv.data
+            _purpose, _tgt = iv.data
             act = next(
                 a for a in self.schedule if a.start == iv.begin and a.end == iv.end
             )
@@ -2142,7 +2145,9 @@ class OrbixScheduler(SurveySimulation):
         # build ObservationRequests in a loop because intTimes is Quantity
         fits = np.ones(len(sInds), dtype=bool)
         _int_times = intTimes.to_value(u.d)
-        for k, (ind, int_time, start) in enumerate(zip(sInds, _int_times, start_mjds)):
+        for k, (_ind, int_time, start) in enumerate(
+            zip(sInds, _int_times, start_mjds, strict=False)
+        ):
             conflict = self._itr.overlaps(start, start + int_time + oh)
             fits[k] = not conflict
         return fits
@@ -2156,7 +2161,7 @@ class OrbixScheduler(SurveySimulation):
         if len(blind_sInds) > 0:
             # Choose a blind detection target
             purpose = "detection"
-            target, int_time, wait_time, comp, comp_div_obs_time = (
+            target, int_time, _wait_time, comp, comp_div_obs_time = (
                 self.choose_blind_target(blind_sInds, blind_intTimes, slewTimes)
             )
             oh = (
@@ -2820,7 +2825,7 @@ class OrbixScheduler(SurveySimulation):
         OS = self.OpticalSystem
         allModes = OS.observingModes
         det_modes = list(filter(lambda mode: "imag" in mode["inst"]["name"], allModes))
-        base_det_mode = list(filter(lambda mode: mode["detectionMode"], allModes))[0]
+        base_det_mode = next(filter(lambda mode: mode["detectionMode"], allModes))
         # and for characterization (default is first spectro/IFS mode)
         spectroModes = list(
             filter(lambda mode: "spec" in mode["inst"]["name"], allModes)
@@ -2889,7 +2894,7 @@ class OrbixScheduler(SurveySimulation):
         self.starVisits[action.target.sInd] += 1
         self.det_starVisits[action.target.sInd] += 1
         # PERFORM DETECTION
-        detected, det_fZ, det_JEZ, det_systemParams, det_SNR, FA = (
+        detected, det_fZ, det_JEZ, det_systemParams, det_SNR, _FA = (
             self.observation_detection(action.target.sInd, _int_time, action.mode)
         )
 
@@ -3026,7 +3031,7 @@ class OrbixScheduler(SurveySimulation):
             str: colorized indices for terminal output
         """
         indices = []
-        for idx, detected in zip(plan_inds, status):
+        for idx, detected in zip(plan_inds, status, strict=False):
             # Get the planet track if it exists
             key = (self.SimulatedUniverse.plan2star[idx], int(idx))
             track = self.planet_tracks.get(key)
@@ -3109,7 +3114,7 @@ class OrbixScheduler(SurveySimulation):
             status = np.zeros(len(plan_inds), dtype=int)
 
         # Get and display mission statistics first
-        stats, mission_header = self.get_mission_stats(action)
+        _stats, mission_header = self.get_mission_stats(action)
 
         # Format the observation summary
         obs_info = (
@@ -4027,7 +4032,7 @@ class OrbixScheduler(SurveySimulation):
 
         # Process active planet tracks
         for key, track in self.planet_tracks.items():
-            sInd, pInd = key
+            _sInd, pInd = key
 
             # Count detections (planets detected at least once)
             if track.det_successes > 0:
@@ -4045,7 +4050,7 @@ class OrbixScheduler(SurveySimulation):
 
         # Process retired planet tracks
         for key, track in self.retired_tracks.items():
-            sInd, pInd = key
+            _sInd, pInd = key
 
             # Count detections
             if track.det_successes > 0:
@@ -4107,7 +4112,7 @@ class OrbixScheduler(SurveySimulation):
 
         # Average wait time between follow-ups
         followup_waits = []
-        for p_key, times in planet_obs_times.items():
+        for _p_key, times in planet_obs_times.items():
             if len(times) > 1:
                 sorted_times = sorted(times)
                 followup_waits.extend(np.diff(sorted_times))
@@ -4547,7 +4552,10 @@ class OrbixScheduler(SurveySimulation):
             L_bin[i] = np.digitize(Lp[i], specific_L_bins[i]) - 1
         L_bin = np.clip(L_bin, 0, len(all_L_types) - 1).astype(int)
         L_types = all_L_types[L_bin]
-        subtypes = [f"{L_type} {Rp_type}" for L_type, Rp_type in zip(L_types, Rp_types)]
+        subtypes = [
+            f"{L_type} {Rp_type}"
+            for L_type, Rp_type in zip(L_types, Rp_types, strict=False)
+        ]
 
         # Determine if the planet is Earth-like
         # Reverse luminosity scaling
@@ -4862,10 +4870,10 @@ class OrbixScheduler(SurveySimulation):
         # Sort planets so that planets around the same star appear on
         # consecutive rows. We first order stars by the earliest detection
         # of any of their planets, then order planets within a star by their
-        # own first detection (tie‑break by planet index).
+        # own first detection (tie-break by planet index).
         # Build star -> first detection mapping
         star_first_detection = {}
-        for (sInd_k, pInd_k), det_time in detection_times.items():
+        for (sInd_k, _pInd_k), det_time in detection_times.items():
             if sInd_k not in star_first_detection:
                 star_first_detection[sInd_k] = det_time
             else:
@@ -5170,7 +5178,7 @@ class OrbixScheduler(SurveySimulation):
             f"Rest of survey ({len(remaining_blind_observations)} obs,"
             f" {remaining_blind_stars} stars)"
         )
-        planet_labels = [blind_label] + planet_labels
+        planet_labels = [blind_label, *planet_labels]
 
         # Boundary between blind row (0) and first planet row (1)
         star_boundaries.append(0.5)
@@ -5225,7 +5233,7 @@ class OrbixScheduler(SurveySimulation):
         ax.set_xticklabels([f"{y:.1f}" for y in tick_years])
 
         # Add mission summary information as text box
-        stats, _ = self.get_mission_stats()
+        _stats, _ = self.get_mission_stats()
         # summary_text = (
         #     f"Mission Summary:\n"
         #     f"Duration: {mission_duration_years:.1f} years\n"
