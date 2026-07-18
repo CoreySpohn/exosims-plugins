@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.0](https://github.com/CoreySpohn/exosims-plugins/compare/v1.1.0...v1.2.0) (2026-07-18)
+
+
+### Features
+
+* absorb dMag0 grid from orbix with x64 and OWA-edge fixes ([7f08b96](https://github.com/CoreySpohn/exosims-plugins/commit/7f08b963bbc1875ded1c2e2deda0dd48e3e2045e))
+* absorb Planets from orbix; de-jit class, filter_jit methods, fix save/load fields ([5705668](https://github.com/CoreySpohn/exosims-plugins/commit/5705668c5985a51d1fbddd2aee67169aa7e1ce37))
+* Create ExoversesUniverse, add SNR margins and observation export, and fix Completeness cache issue ([b1c21a4](https://github.com/CoreySpohn/exosims-plugins/commit/b1c21a4adf3c38d28e408d69573f4d5e6aabe74d))
+
 ## [1.1.0](https://github.com/CoreySpohn/exosims-plugins/compare/v1.0.2...v1.1.0) (2025-12-20)
 
 
