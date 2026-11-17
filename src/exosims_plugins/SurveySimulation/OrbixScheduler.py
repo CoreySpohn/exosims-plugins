@@ -26,6 +26,7 @@ from intervaltree import Interval, IntervalTree
 from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.patches import Patch
 from orbix.kepler import Grid
+from skyscapes.population import earth_like
 
 from exosims_plugins.dmag0 import dMag0_grid, epoch_jez
 
@@ -4465,19 +4466,7 @@ class OrbixScheduler(SurveySimulation):
             for L_type, Rp_type in zip(L_types, Rp_types, strict=False)
         ]
 
-        # Determine if the planet is Earth-like
-        # Reverse luminosity scaling
-        scaled_a = a / np.sqrt(star_lum.to(u.Lsun).value)
-
-        lower_a = 0.95
-        upper_a = 1.67
-
-        lower_R = 0.8 / np.sqrt(scaled_a)
-        upper_R = 1.4
-        earth_a_cond = (lower_a <= scaled_a) & (scaled_a < upper_a)
-        earth_Rp_cond = (lower_R <= Rp) & (Rp < upper_R)
-
-        is_earth = earth_a_cond & earth_Rp_cond
+        is_earth = np.asarray(earth_like(a, Rp, star_lum.to_value(u.Lsun)))
         return subtypes, is_earth
 
     def _queue_for_later_retry(self, track):
