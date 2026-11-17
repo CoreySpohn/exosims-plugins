@@ -23,7 +23,7 @@ import pandas as pd
 from EXOSIMS.Prototypes.SurveySimulation import SurveySimulation
 from hwoutils.constants import d2s
 from hwoutils.conversions import lambda_d_to_arcsec, um_to_nm
-from optixstuff import YippyCoronagraph
+from optixstuff.apertures import DEFAULT_APERTURE_RULE, Circular
 
 # pyEDITH imports
 from pyEDITH import (
@@ -34,7 +34,7 @@ from pyEDITH import (
     parse_input,
 )
 from tqdm import tqdm
-from yippy import DEFAULT_APERTURE_RULE, Circular, EqxCoronagraph
+from yippy import Coronagraph
 
 
 class PyEDITHSimulation(SurveySimulation):
@@ -871,9 +871,9 @@ class PyEDITHSimulation(SurveySimulation):
     # =========================================================================
 
     def _load_yippy_coronagraph(self):
-        """Load the optical-path adapter for vectorized ETC.
+        """Load the coronagraph for vectorized ETC.
 
-        The optixstuff YippyCoronagraph exposes prepared radial performance curves:
+        The yippy Coronagraph exposes prepared radial performance curves:
         - throughput(sep_lod) -> core throughput
         - raw_contrast(sep_lod) -> stellar contrast
         - occulter_transmission(sep_lod) -> sky transmission
@@ -896,9 +896,7 @@ class PyEDITHSimulation(SurveySimulation):
             )
 
         self.vprint(f"Loading yippy Coronagraph from: {coro_path}")
-        self._yippy_coronagraph = YippyCoronagraph(
-            backend=EqxCoronagraph(coro_path, rule=self.aperture_rule)
-        )
+        self._yippy_coronagraph = Coronagraph(coro_path, rules=(self.aperture_rule,))
 
         # Store key parameters
         self._coro_IWA_lod = float(
