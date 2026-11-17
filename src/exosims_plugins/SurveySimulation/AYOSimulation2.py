@@ -1078,10 +1078,10 @@ class AYOSimulation2(SurveySimulation):
         noisefloor_PPF = params.get("noisefloor_PPF", 30.0)
 
         # Detector params
-        det_DC = params.get("det_DC", 0.0003)
-        det_RN = params.get("det_RN", 0.0)
-        det_tread = params.get("det_tread", 10.0)
-        det_CIC = params.get("det_CIC", 0.0013)
+        det_DC = params.get("DC", 0.0003)
+        det_RN = params.get("RN", 0.0)
+        det_tread = params.get("tread", 10.0)
+        det_CIC = params.get("CIC", 0.0013)
         npix_multiplier = params.get("npix_multiplier", 1.0)
         QE = float(observatory.detector.QE[0].value)
         dQE = float(observatory.detector.dQE[0].value)
@@ -1092,7 +1092,7 @@ class AYOSimulation2(SurveySimulation):
         )
 
         # Exozodi setup
-        nexozodis = params.get("nexozodis", 3.0)
+        nexozodis = params.get("nzodis", 3.0)
         F_exozodi = Fzodi * nexozodis
         WA_au = sep_arcsec * dist_pc
         WA_au_safe = np.maximum(WA_au, 0.01)
@@ -1374,10 +1374,10 @@ class AYOSimulation2(SurveySimulation):
         nrolls = params.get("nrolls", 1)
 
         # Detector params
-        det_DC = params.get("det_DC", 0.0003)
-        det_RN = params.get("det_RN", 0.0)
-        det_tread = params.get("det_tread", 10.0)
-        det_CIC = params.get("det_CIC", 0.0013)
+        det_DC = params.get("DC", 0.0003)
+        det_RN = params.get("RN", 0.0)
+        det_tread = params.get("tread", 10.0)
+        det_CIC = params.get("CIC", 0.0013)
         npix_multiplier = params.get("npix_multiplier", 1.0)
         QE = float(observatory.detector.QE[0].value)
         dQE = float(observatory.detector.dQE[0].value)
@@ -1389,7 +1389,7 @@ class AYOSimulation2(SurveySimulation):
 
         # Exozodi setup
         dist_pc = float(self.TargetList.dist[sInd].value)
-        nexozodis = params.get("nexozodis", 3.0)
+        nexozodis = params.get("nzodis", 3.0)
         F_exozodi = Fzodi * nexozodis
         WA_au = WA_grid * dist_pc
         WA_au_safe = np.maximum(WA_au, 0.01)

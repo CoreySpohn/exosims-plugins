@@ -1033,7 +1033,7 @@ class PyEDITHSimulation(SurveySimulation):
         # deltalambda
         # Scales with 1/dist^2 (exozodi is farther than local)
         dist_pc = float(self.TargetList.dist[sInd].value)
-        nexozodis = params.get("nexozodis", 3.0)  # Default 3 zodis
+        nexozodis = params.get("nzodis", 3.0)  # Default 3 zodis
         # F_exozodi = Fzodi * nexozodis (relative to local zodi)
         F_exozodi = Fzodi * nexozodis
         # Exozodi illumination scales with 1/r^2 where r is in AU projected
@@ -1052,10 +1052,10 @@ class PyEDITHSimulation(SurveySimulation):
         )
 
         # Detector noise: CRbd = (DC + RN^2/tread + CIC/t_photon) * npix
-        det_DC = params.get("det_DC", 0.0003)  # Dark current e-/pix/s
-        det_RN = params.get("det_RN", 0.0)  # Read noise e-/pix (PC mode = 0)
-        det_tread = params.get("det_tread", 10.0)  # Read time (s)
-        det_CIC = params.get("det_CIC", 0.0013)  # Clock induced charge
+        det_DC = params.get("DC", 0.0003)  # Dark current e-/pix/s
+        det_RN = params.get("RN", 0.0)  # Read noise e-/pix (PC mode = 0)
+        det_tread = params.get("tread", 10.0)  # Read time (s)
+        det_CIC = params.get("CIC", 0.0013)  # Clock induced charge
         npix_multiplier = params.get("npix_multiplier", 1.0)
         # npix = npix_multiplier * omega * (1/pixscale^2) * nchannels
         npix = npix_multiplier * omega / (pixscale**2) * nchannels

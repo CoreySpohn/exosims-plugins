@@ -149,13 +149,15 @@ def test_csv_noise_floor_is_point_source_contrast(tmp_path):
             total_throughput=[1] * u.one,
         ),
         TargetList=SimpleNamespace(dist=[10.0] * u.pc),
-        det_params={"wavelength": 0.5},
+        det_params={"wavelength": 0.5, "DC": 0.25, "RN": 0.0, "CIC": 0.0},
         aperture_rule=SimpleNamespace(radius_lod=1.0),
         vprint=lambda _: None,
     )
     AYOSimulation2._load_noise_floor_csv(survey, csv_path)
     rates = AYOSimulation2.calc_count_rates(survey, 2.0, 19.0, 10.0)
     assert rates["noise_floor_fraction"].item() == contrast * 0.5
+    # Detector settings are read by their mapped names, not the AYO names.
+    assert rates["CRbd"].item() == pytest.approx(0.25 * rates["npix"].item())
     assert rates["CRnf"].item() == pytest.approx(
         rates["SNR"] * rates["flux_factor"] * contrast * 0.5
     )
