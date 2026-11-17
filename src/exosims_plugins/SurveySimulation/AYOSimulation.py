@@ -291,11 +291,7 @@ class AYOSimulation(SurveySimulation):
             else:
                 kEZ = 1.0
 
-            # Get the int_time index
-            int_times = np.array(dMag0Grid.int_times)
-            int_time_hr = (int_time_days * u.d).to_value(u.hr)
-            int_ind = np.searchsorted(int_times, int_time_hr)
-            int_ind = np.clip(int_ind, 0, len(int_times) - 1)
+            int_ind = dMag0Grid.exposure_index(int_time_days)
 
             # Calculate which orbits are detectable at this integration time
             # alpha_dMag_mask returns True for orbits that ARE detectable
@@ -452,6 +448,8 @@ class AYOSimulation(SurveySimulation):
                 - n_detectable: Number of detectable orbits
                 - avg_char_time: Average minimum char time (days)
         """
+        from exosims_plugins.dmag0 import epoch_jez
+
         TL = self.TargetList
         OS = self.OpticalSystem
         Comp = self.Completeness
@@ -501,13 +499,9 @@ class AYOSimulation(SurveySimulation):
         valid_dMag = best_dMag[valid_mask]
         valid_WA = best_alpha[valid_mask] * u.arcsec
 
-        # Prepare fZ and fEZ for vectorized calc_intTime
-        fZ_val = fZ
-        mode_hash = mode.get("hashname", mode.get("hex"))
-        if hasattr(TL, "JEZ0") and isinstance(TL.JEZ0, dict):
-            fEZ = TL.JEZ0[mode_hash][sInd] * kEZ
-        else:
-            fEZ = self.ZodiacalLight.fEZ0 * kEZ
+        # Use the projected separation as the dust radius, as in the dMag0 grid.
+        valid_r_au = s_det[valid_mask, best_t_indices[valid_mask]].astype(float)
+        jez = epoch_jez(TL, sInd, mode, valid_r_au, kEZ, fbeta=1.0)
 
         # Create arrays of sInd for vectorized call
         sInds_arr = np.full(n_valid, sInd, dtype=int)
@@ -517,8 +511,8 @@ class AYOSimulation(SurveySimulation):
             char_int_times = OS.calc_intTime(
                 TL,
                 sInds_arr,
-                fZ_val,
-                fEZ,
+                fZ,
+                jez,
                 valid_dMag,
                 valid_WA,
                 mode,

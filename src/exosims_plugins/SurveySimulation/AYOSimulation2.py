@@ -848,8 +848,8 @@ class AYOSimulation2(SurveySimulation):
         stability limit (speckle noise) that cannot be removed, as opposed to
         the theoretical diffraction limit from yippy.
 
-        The CSV noise floor is ALREADY calculated as Contrast / PPF, so we use
-        it directly without further division.
+        The CSV values are point-source contrasts integrated over the aperture
+        and divided by the post-processing factor.
         """
         from scipy.interpolate import interp1d
 
@@ -991,9 +991,10 @@ class AYOSimulation2(SurveySimulation):
                 - CRb: Total background count rate (CRbs + CRbz + CRbez + CRbd)
                 - throughput: Core throughput (T_core)
                 - omega: Photometric aperture solid angle in (lambda/D)^2
-                - Istar: Stellar intensity at separation
+                - Istar: Stellar leakage density per (lambda/D)^2 at separation
                 - SkyTrans: Sky transmission at separation
-                - noise_floor_density: Noise floor contrast at separation
+                - noise_floor_fraction: Post-processed stellar flux fraction in the
+                  aperture (CSV point-source contrast times core throughput)
                 - flux_factor: Common flux factor for calculations
                 - F0: Zero-magnitude flux
                 - Fs_over_F0: Stellar flux ratio (10^(-0.4*mag))
@@ -1104,35 +1105,31 @@ class AYOSimulation2(SurveySimulation):
         if rule != self.aperture_rule:
             coro = coro.with_rules((rule,))
         record = coro.curves(rule)
-        Istar = record.evaluate("leakage_density_lod2", sep_flat).reshape(shape)
+        leakage_density = record.evaluate("leakage_density_lod2", sep_flat).reshape(
+            shape
+        )
         SkyTrans = np.asarray(coro.occulter_transmission(sep_flat)).reshape(shape)
         throughput = np.clip(record.evaluate("throughput", sep_flat), 0, 1).reshape(
             shape
         )
         omega = record.evaluate("core_area_lod2", sep_flat).reshape(shape)
 
-        # Noise floor
-        if (
-            hasattr(self, "_noise_floor_interp")
-            and self._noise_floor_interp is not None
-        ):
-            noise_floor_density = np.maximum(
-                self._noise_floor_interp(sep_flat), 1e-15
-            ).reshape(shape)
-            use_csv_noisefloor = True
+        noise_floor_interp = getattr(self, "_noise_floor_interp", None)
+        use_csv_noisefloor = noise_floor_interp is not None
+        if use_csv_noisefloor:
+            noise_floor_fraction = (
+                noise_floor_interp(sep_flat).reshape(shape) * throughput
+            )
         else:
-            noise_floor_density = np.maximum(
-                Istar.flatten() / noisefloor_PPF, 1e-15
-            ).reshape(shape)
-            use_csv_noisefloor = False
+            noise_floor_fraction = leakage_density / noisefloor_PPF * omega
 
         # === Count Rate Calculations ===
 
         # Planet count rate: CRp = flux_factor * Fp/Fs * throughput
         CRp = flux_factor * Fp_over_Fs * throughput
 
-        # Stellar leakage: CRbs = flux_factor * Istar * omega
-        CRbs = flux_factor * Istar * omega
+        # Stellar leakage integrated over the photometric aperture
+        CRbs = flux_factor * leakage_density * omega
 
         # Zodi background
         omega_arcsec2 = omega * (lod_arcsec**2)
@@ -1157,8 +1154,7 @@ class AYOSimulation2(SurveySimulation):
         t_photon_count = 1.0 / (6.73 * np.maximum(CRp / npix, 1e-10))
         CRbd = (det_DC + det_RN**2 / det_tread + det_CIC / t_photon_count) * npix
 
-        # Both sources express leakage density after post-processing.
-        CRnf = SNR * flux_factor * noise_floor_density * omega
+        CRnf = SNR * flux_factor * noise_floor_fraction
 
         # Total background
         CRb = CRbs + CRbz + CRbez + CRbd
@@ -1202,9 +1198,9 @@ class AYOSimulation2(SurveySimulation):
             "throughput": throughput,
             "omega": omega,
             "omega_arcsec2": omega_arcsec2,
-            "Istar": Istar,
+            "Istar": leakage_density,
             "SkyTrans": SkyTrans,
-            "noise_floor_density": noise_floor_density,
+            "noise_floor_fraction": noise_floor_fraction,
             "npix": npix,
             # Flux values
             "flux_factor": flux_factor,
@@ -1398,34 +1394,17 @@ class AYOSimulation2(SurveySimulation):
         WA_au = WA_grid * dist_pc
         WA_au_safe = np.maximum(WA_au, 0.01)
 
-        # Start from the mode rule; each candidate below uses its own leakage.
-        Istar = np.maximum(
-            coro.curves(self.aperture_rule).evaluate("leakage_density_lod2", sep_flat),
-            1e-20,
-        ).reshape(shape)
-
         # Occulter Transmission (SkyTrans) is constant across apertures
         # Used for Zodi background calculation
         SkyTrans = np.asarray(coro.occulter_transmission(sep_flat)).reshape(shape)
 
-        # Noise floor for CRnf calculation
-        # If we have a CSV-based noise floor (from AYO output), use it directly.
-        # Otherwise, divide leakage density by the same ppf=30.
-        if (
-            hasattr(self, "_noise_floor_interp")
-            and self._noise_floor_interp is not None
-        ):
-            # Use empirical noise floor from AYO CSV (already = Contrast/PPF)
-            noise_floor_density = np.maximum(
-                self._noise_floor_interp(sep_flat), 1e-15
-            ).reshape(shape)
-            use_csv_noisefloor = True
-        else:
-            # Divide leakage density by the post-processing factor.
-            noise_floor_density = np.maximum(
-                Istar.flatten() / noisefloor_PPF, 1e-15
-            ).reshape(shape)
-            use_csv_noisefloor = False
+        # The empirical point-source contrast applies to all candidate apertures.
+        noise_floor_interp = getattr(self, "_noise_floor_interp", None)
+        csv_noise_floor_contrast = (
+            noise_floor_interp(sep_flat).reshape(shape)
+            if noise_floor_interp is not None
+            else None
+        )
 
         # Initialize array for optimal integration times
         best_inttime_days = np.full(shape, np.inf)
@@ -1444,15 +1423,19 @@ class AYOSimulation2(SurveySimulation):
 
             # 2. Omega (area) for this aperture
             omega = data.evaluate("core_area_lod2", sep_flat).reshape(shape)
-            Istar = data.evaluate("leakage_density_lod2", sep_flat).reshape(shape)
-            if not use_csv_noisefloor:
-                noise_floor_density = Istar / noisefloor_PPF
+            leakage_density = data.evaluate("leakage_density_lod2", sep_flat).reshape(
+                shape
+            )
+            if csv_noise_floor_contrast is None:
+                noise_floor_fraction = leakage_density / noisefloor_PPF * omega
+            else:
+                noise_floor_fraction = csv_noise_floor_contrast * throughput
 
             # Planet count rate: CRp = flux * Fp/Fs * throughput
             CRp = flux_factor * Fp_over_Fs * throughput
 
-            # Stellar leakage: CRbs = flux * Istar * omega
-            CRbs = flux_factor * Istar * omega
+            # Stellar leakage integrated over the photometric aperture
+            CRbs = flux_factor * leakage_density * omega
 
             # Zodi: CRbz = Fzodi * omega_arcsec^2 * A * (SkyTrans * QE * dQE) *
             # deltalambda
@@ -1489,8 +1472,7 @@ class AYOSimulation2(SurveySimulation):
             t_photon_count = 1.0 / (6.73 * np.maximum(CRp / npix, 1e-10))
             CRbd = (det_DC + det_RN**2 / det_tread + det_CIC / t_photon_count) * npix
 
-            # Both sources express leakage density after post-processing.
-            CRnf = SNR * flux_factor * noise_floor_density * omega
+            CRnf = SNR * flux_factor * noise_floor_fraction
 
             # Total background
             CRb = CRbs + CRbz + CRbez + CRbd

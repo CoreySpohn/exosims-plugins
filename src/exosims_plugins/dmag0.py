@@ -10,12 +10,25 @@ import equinox as eqx
 import EXOSIMS
 import jax.numpy as jnp
 import numpy as np
+import zodi
 from EXOSIMS.util.utils import dictToSortedStr, genHexStr
 from jax import lax, vmap
 from tqdm import tqdm
 
 # Define a machine-local cache directory under the user's home directory
 CACHE_DIR = Path(Path.home(), ".orbix", "cache", "dMag0_grid")
+
+
+def epoch_jez(TL, sInd, mode, r_au, nzodi, *, fbeta=None):
+    """Scale a star's EEID reference JEZ to planet-star distances in AU.
+
+    By default, use the system's latitudinal factor. Pass ``fbeta=1`` when
+    ``nzodi`` already includes the latitudinal factor, as in kEZ.
+    """
+    jez0 = TL.JEZ0[mode["hex"]][sInd]
+    if fbeta is None:
+        fbeta = TL.system_fbeta[sInd]
+    return zodi.scale_jez(jez0.value, nzodi, r_au, fbeta, TL.L[sInd]) << jez0.unit
 
 
 def safe_cache_load(cache_path):
@@ -60,8 +73,7 @@ class dMag0Grid(eqx.Module):
 
     # Regular array fields
     kEZs: jnp.ndarray  # shape (N_kEZ,)
-    # days
-    int_times: jnp.ndarray  # shape (N_t,)
+    int_times: jnp.ndarray  # shape (N_t,), in days
     # shape (N_fZ, N_kEZ, N_t, N_alpha)
     # NOTE: transposed from (N_fZ, N_kEZ, N_alpha, N_t) in the init
     #  which it gets calculated as
@@ -99,6 +111,11 @@ class dMag0Grid(eqx.Module):
         self.log_alphas = jnp.log10(alphas)
         log_alpha_step = self.log_alphas[1] - self.log_alphas[0]
         self.inv_log_alpha_step = 1.0 / log_alpha_step
+
+    def exposure_index(self, exposure_d):
+        """Return the first exposure bin at or above the requested days, clipped."""
+        index = np.searchsorted(self.int_times, exposure_d, side="left")
+        return int(np.clip(index, 0, self.int_times.size - 1))
 
     def _alpha_dMag_mask_sing(self, trig_solver, alpha, dMag, fZ, kEZ):
         """Calculate detection probability directly from this grid.
@@ -503,6 +520,12 @@ class dMag0Grid(eqx.Module):
         )
 
 
+def _axis_hash(values):
+    """Hash all values on a grid axis in float64."""
+    axis_bytes = np.asarray(values, dtype=np.float64).tobytes()
+    return hashlib.sha1(axis_bytes, usedforsecurity=False).hexdigest()[:12]
+
+
 def dMag0_grid(
     SS, mode, int_times, nEZ_range, n_fZs=10, n_alphas=50, n_kEZs=3, snr_margin=0.0
 ):
@@ -536,6 +559,14 @@ def dMag0_grid(
     mode["SNR"] = mode["SNR"] + snr_margin
 
     int_times_d = int_times.to_value(u.d)
+    # Calculate the kEZ axis before hashing the actual grid values.
+    inclinations = np.linspace(0, 180, 180) * u.deg
+    fbeta_range = ZL.calc_fbeta(inclinations)
+    kEZ_inc = fbeta_range * (1 - (np.sin(inclinations) ** 2) / 2)
+    kEZs = np.linspace(
+        np.min(kEZ_inc) * np.min(nEZ_range), np.max(kEZ_inc) * np.max(nEZ_range), n_kEZs
+    )
+
     # Generate a hex string that only includes parameters affecting dMag0
     dMag0_hex = gen_dMag0_hex(mode, SS)
 
@@ -550,20 +581,12 @@ def dMag0_grid(
         + dMag0_hex  # Use our new hex instead of mode["hex"]
         + f"n_fZs_{n_fZs}"
         + f"n_alphas_{n_alphas}"
-        + f"n_EZ_range_{nEZ_range[0]}-{nEZ_range[-1]}"
-        + f"int_times{int_times_d[0]:.2f}{int_times_d[-1]:.2f}{int_times_d.shape[0]}"
+        + f"n_kEZs_{n_kEZs}"
+        + f"n_EZ_range_{_axis_hash(nEZ_range)}"
+        + f"kEZs_{_axis_hash(kEZs)}"
+        + f"int_times_{_axis_hash(int_times_d)}"
         + f"SNR_{mode['SNR']:.2f}"
         + f"snr_margin_{snr_margin:.2f}"
-    )
-
-    # Get the JEZ values as a copy to avoid modifying the original value
-    JEZ0 = TL.JEZ0[mode["hex"]].copy()
-    # Calculate the range of kEZ values
-    inclinations = np.linspace(0, 180, 180) * u.deg
-    fbeta_range = ZL.calc_fbeta(inclinations)
-    kEZ_inc = fbeta_range * (1 - (np.sin(inclinations) ** 2) / 2)
-    kEZs = np.linspace(
-        np.min(kEZ_inc) * np.min(nEZ_range), np.max(kEZ_inc) * np.max(nEZ_range), n_kEZs
     )
 
     # Get the fZMap which has all stars
@@ -577,7 +600,7 @@ def dMag0_grid(
     # Create the jax arrays for the dMag0_grid module
     alphas_jnp = jnp.array(alphas.to_value(u.arcsec))
     kEZs_jnp = jnp.array(kEZs)
-    int_times_jnp = jnp.array(int_times.to_value(u.d))
+    int_times_jnp = jnp.array(int_times_d)
 
     # Dictionary to store all grid objects
     all_grids = {}
@@ -607,11 +630,12 @@ def dMag0_grid(
         fZs = np.logspace(np.log10(fZ_range[0]), np.log10(fZ_range[1]), n_fZs)
         _sInd = np.repeat(sInd, len(int_times))
         fZs_jnp = jnp.array(fZs)
-        approx_r2 = (alphas.to_value(u.rad) * TL.dist[sInd].to_value(u.AU)) ** 2
+        approx_r_au = alphas.to_value(u.rad) * TL.dist[sInd].to_value(u.AU)
+        jez_grid = epoch_jez(TL, sInd, mode, approx_r_au, kEZs[:, None], fbeta=1.0)
         for fZ_ind, fZ in enumerate(fZs):
             # repeat the fZ value for each integration time
             _fZ = np.repeat(fZ, len(int_times)) << SS.fZ_unit
-            for kEZ_ind, _kEZ in enumerate(kEZs):
+            for kEZ_ind in range(len(kEZs)):
                 for alpha_ind, _alpha in enumerate(alphas):
                     # Add a tiny amount to the first alpha to avoid nans
                     if alpha_ind == 0:
@@ -621,16 +645,12 @@ def dMag0_grid(
                     elif alpha_ind == len(alphas) - 1:
                         _alpha -= 1e-6 * u.arcsec
 
-                    # JEZ is a function of kEZ and alpha and is the same for all
-                    # integration times but depends on the star and observing mode
-                    _JEZ = _kEZ * JEZ0[sInd] / approx_r2[alpha_ind]
-                    # All inputs should have the same shape as int_times
                     _dMag0s[fZ_ind, kEZ_ind, alpha_ind] = OS.calc_dMag_per_intTime(
                         int_times,
                         TL,
                         _sInd,
                         _fZ,
-                        _JEZ,
+                        jez_grid[kEZ_ind, alpha_ind],
                         _alpha,
                         mode,
                         analytic_only=True,

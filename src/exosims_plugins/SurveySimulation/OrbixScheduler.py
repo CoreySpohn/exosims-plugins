@@ -27,7 +27,7 @@ from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.patches import Patch
 from orbix.kepler import Grid
 
-from exosims_plugins.dmag0 import dMag0_grid
+from exosims_plugins.dmag0 import dMag0_grid, epoch_jez
 
 warnings.filterwarnings("ignore", category=UserWarning, module="erfa")
 
@@ -713,8 +713,7 @@ class OrbixScheduler(SurveySimulation):
             kEZ = self.exact_kEZs[sInd]
             mask = _dMag0Grid.alpha_dMag_mask(alphas, dMags, fZ, kEZ)
 
-            # Get the closest int_time to the observation's int_time
-            int_time_ind = np.searchsorted(_dMag0Grid.int_times, action.int_time)
+            int_time_ind = _dMag0Grid.exposure_index(action.int_time)
 
             # Get the mask for the used int_time
             mask = mask[:, 0, int_time_ind]
@@ -1183,6 +1182,7 @@ class OrbixScheduler(SurveySimulation):
         mission_finish_mjd = (
             self.TimeKeeping.missionFinishAbs.mjd
         )  # Get mission end for boundary
+        int_times_days = np.asarray(_int_times, dtype=float)
 
         # Iterate over each candidate follow-up start time generated for this planet
         for i, obs_start_mjd_val in enumerate(prop_times_mjd):
@@ -1191,7 +1191,7 @@ class OrbixScheduler(SurveySimulation):
                 sInd=track.sInd,
                 mode_name=mode["syst"]["name"],
                 obs_start_mjd=obs_start_mjd_val,
-                sorted_int_times_days=_int_times,
+                int_times_days=int_times_days,
                 overhead_days=overhead_days,
                 mission_finish_mjd=mission_finish_mjd,
             )
@@ -1316,8 +1316,7 @@ class OrbixScheduler(SurveySimulation):
                             time_limits=fits_time_mask,
                             mission_limits=fits_mission,
                             result="bump_success",
-                            selected_time=prop_times[row],
-                            selected_int=_int_times[col],
+                            selected_cell=(row, col),
                         )
 
                 return cand_start, _int_times[col], max_pdet, pdet_val, predicted_values
@@ -1338,8 +1337,7 @@ class OrbixScheduler(SurveySimulation):
                         time_limits=fits_time_mask,
                         mission_limits=fits_mission,
                         result="bump_failure",
-                        selected_time=prop_times[row],
-                        selected_int=_int_times[col],
+                        selected_cell=(row, col),
                     )
 
             return None, None, max_pdet, None, None
@@ -1396,8 +1394,7 @@ class OrbixScheduler(SurveySimulation):
                     time_limits=fits_time_mask,
                     mission_limits=fits_mission,
                     result="success",
-                    selected_time=prop_times[row],
-                    selected_int=int_time,
+                    selected_cell=(row, col),
                 )
 
         return t_start, int_time, max_pdet, pdet_val, predicted_values
@@ -1420,11 +1417,10 @@ class OrbixScheduler(SurveySimulation):
         jax_time = jnp.array([time_norm])
 
         # Get position in AU
-        pos_AU = planets.j_prop_AU(self.solver, jax_time)  # Shape: (n_orbits, 3)
+        pos_AU = planets.j_prop_AU(self.solver, jax_time)  # (n_orbits, 3, n_times)
 
         # Get alpha (separation) and dMag
         alphas, dMags = planets.j_alpha_dMag(self.solver, jax_time)
-        alphas_rad = (alphas * u.arcsec).to_value(u.rad)
 
         # Calculate distance (magnitude of position vector)
         distances_AU = jnp.sqrt(jnp.sum(pos_AU**2, axis=1))
@@ -1432,23 +1428,16 @@ class OrbixScheduler(SurveySimulation):
         # Take the median values across all orbit realizations for the prediction
         predicted_WA = float(jnp.median(alphas))  # arcsec
         predicted_d = float(jnp.median(distances_AU))  # AU
-        predicted_separation = float(
-            jnp.median(alphas_rad) * self.TargetList.dist[track.sInd].to_value(u.AU)
-        )  # AU
         predicted_dMag = float(jnp.median(dMags))
         predicted_fZ = float(fZ_val)  # Already a scalar
 
-        # Calculate predicted JEZ using the same method as actual observations
-        # Get the base JEZ for this star and mode
-        JEZ0 = self.TargetList.JEZ0[mode["hex"]][track.sInd]
-
-        # Get the planet-specific nEZ and system fbeta
-        nEZ = self.SimulatedUniverse.nEZ[track.pInd]
-        fbeta = self.TargetList.system_fbeta[track.sInd]
-
-        # Apply the 1/r^2 scaling using predicted orbital distance
-        # This matches how SimulatedUniverse.scale_JEZ works
-        predicted_JEZ = JEZ0 * nEZ * (1 / predicted_separation) ** 2 * fbeta
+        predicted_JEZ = epoch_jez(
+            self.TargetList,
+            track.sInd,
+            mode,
+            predicted_d,
+            self.SimulatedUniverse.nEZ[track.pInd],
+        )
 
         return {
             "predicted_fZ": predicted_fZ,
@@ -2007,85 +1996,12 @@ class OrbixScheduler(SurveySimulation):
         sInd: int,
         mode_name: str,
         obs_start_mjd: float,
-        sorted_int_times_days: np.ndarray,
-        overhead_days: float,
-    ) -> np.ndarray:
-        """Observable integration time mask for a given start time, mode, and star.
-
-        For a given star and observation start time, determines which integration
-        times result in an observable window using a bisection search approach.
-
-        Assumes sorted_int_times_days is sorted in ascending order.
-
-        Args:
-            sInd (int):
-                Star index.
-            mode_name (str):
-                Observing mode name.
-            obs_start_mjd (float):
-                The MJD for the start of the observation.
-            sorted_int_times_days (np.ndarray):
-                1D array of integration times (in days), sorted ascending.
-            overhead_days (float):
-                Total overhead time (settling + instrument) in days.
-
-        Returns:
-            np.ndarray:
-                A 1D boolean mask of the same length as sorted_int_times_days.
-                True if the observation [obs_start_mjd, obs_start_mjd +
-                int_time + overhead) is observable, False otherwise.
-        """
-        num_int_times = len(sorted_int_times_days)
-        if num_int_times == 0:
-            return np.array([], dtype=bool)
-
-        # This mask will be [True, True, ..., True, False, False, ...]
-        observable_mask = np.zeros(num_int_times, dtype=bool)
-
-        # Bisection search to find the first integration time index (k)
-        # such that the interval
-        # [obs_start_mjd, obs_start_mjd + sorted_int_times_days[k] + overhead_days)
-        # is NOT observable. All intervals with indices < k will be observable.
-        low = 0
-        # Exclusive upper bound for search, represents count of observable int_times
-        high = num_int_times
-        # Assume all are observable initially
-        first_non_observable_idx = num_int_times
-
-        while low < high:
-            mid_idx = low + (high - low) // 2
-            current_int_time = sorted_int_times_days[mid_idx]
-            obs_end_mjd = obs_start_mjd + current_int_time + overhead_days
-
-            if self.is_observable(sInd, mode_name, obs_start_mjd, obs_end_mjd):
-                # This interval is observable. The first non-observable one
-                # must be further to the right (i.e., a longer integration
-                # time, or all are observable so far).
-                low = mid_idx + 1
-            else:
-                # This interval is NOT observable. This could be the first
-                # non-observable one. Record it and search in the left half
-                # (including this mid_idx).
-                first_non_observable_idx = mid_idx
-                high = mid_idx
-
-        # All integration times from index 0 up to first_non_observable_idx - 1
-        # are observable.
-        if first_non_observable_idx > 0:
-            observable_mask[0:first_non_observable_idx] = True
-
-        return observable_mask
-
-    def _get_observable_int_time_mask_for_start_time(
-        self,
-        sInd: int,
-        mode_name: str,
-        obs_start_mjd: float,
-        sorted_int_times_days: np.ndarray,
+        int_times_days: np.ndarray,
         overhead_days: float,
         mission_finish_mjd: float,
     ) -> np.ndarray:
-        num_int_times = len(sorted_int_times_days)
+        """Mark exposure durations that fit before keepout or mission end."""
+        num_int_times = len(int_times_days)
         if num_int_times == 0:
             return np.array([], dtype=bool)
 
@@ -2127,14 +2043,7 @@ class OrbixScheduler(SurveySimulation):
         if max_allowed_int_time_days <= 0:
             return observable_mask
 
-        # count of elements <= max_allowed_int_time_days
-        count_observable = np.searchsorted(
-            sorted_int_times_days, max_allowed_int_time_days, side="right"
-        )
-
-        observable_mask[:count_observable] = True
-
-        return observable_mask
+        return int_times_days <= max_allowed_int_time_days
 
     def fits_schedule(self, sInds, intTimes, start_mjds, mode, purpose):
         """Returns a boolean array the same length as sInds.
@@ -2476,7 +2385,9 @@ class OrbixScheduler(SurveySimulation):
                 # )
                 SU.propag_system(sInd, currentTimeNorm - self.propagTimes[sInd])
                 # Calculate the exozodi intensity
-                JEZs[i] = SU.scale_JEZ(sInd, mode)
+                JEZs[i] = epoch_jez(
+                    TL, sInd, mode, SU.d[pInds].to_value(u.AU), SU.nEZ[pInds]
+                )
                 self.propagTimes[sInd] = currentTimeNorm  # + timePlus
                 # save planet parameters
                 systemParamss[i] = SU.dump_system_params(sInd)
@@ -2509,7 +2420,7 @@ class OrbixScheduler(SurveySimulation):
                 (currentTimeAbs).reshape(1),
                 mode,
             )[0]
-            # Use the default star value if no planets
+            # Report the EEID reference when there is no planet radius.
             JEZ = TL.JEZ0[mode["hex"]][sInd]
 
         # find out if a false positive (false alarm) or any false negative
@@ -2586,7 +2497,6 @@ class OrbixScheduler(SurveySimulation):
 
         # find indices of planets around the target
         pInds = np.where(SU.plan2star == sInd)[0]
-        JEZs = SU.scale_JEZ(sInd, mode)
 
         # get the detected status, and check if there was a FA
         # det = self.lastDetected[sInd,0]
@@ -2735,7 +2645,9 @@ class OrbixScheduler(SurveySimulation):
                     SU.propag_system(sInd, currentTimeNorm - self.propagTimes[sInd])
                     self.propagTimes[sInd] = currentTimeNorm  # + timePlus
                     # Calculate the exozodi intensity
-                    JEZs[i] = SU.scale_JEZ(sInd, mode, pInds=pInds)
+                    JEZs[i] = epoch_jez(
+                        TL, sInd, mode, SU.d[pInds].to_value(u.AU), SU.nEZ[pInds]
+                    )
                     # save planet parameters
                     systemParamss[i] = SU.dump_system_params(sInd)
                     # calculate signal and noise (electron count rates)
@@ -2769,7 +2681,7 @@ class OrbixScheduler(SurveySimulation):
                     TK.currentTimeAbs.copy().reshape(1),
                     mode,
                 )[0]
-                # Use the default star value if no planets
+                # Report the EEID reference when there is no planet radius.
                 JEZ = TL.JEZ0[mode["hex"]][sInd]
 
             # calculate the false alarm SNR (if any)
@@ -2917,6 +2829,7 @@ class OrbixScheduler(SurveySimulation):
             _drm_entry["det_WA"] = SU.WA[_meta["plan_inds"]].to(u.mas).value.tolist()
 
         if action.int_time is not None:
+            # Report catalog-reference completeness at the target's fiducial WA.
             det_comp = Comp.comp_per_intTime(
                 action.int_time << u.d,
                 TL,
@@ -2981,6 +2894,7 @@ class OrbixScheduler(SurveySimulation):
             char_data["char_params"] = char_systemParams
 
             if char_intTime is not None and np.any(characterized):
+                # Report catalog-reference completeness at the fiducial WA.
                 char_comp = Comp.comp_per_intTime(
                     char_intTime,
                     TL,
@@ -3433,9 +3347,7 @@ class OrbixScheduler(SurveySimulation):
         # Get observation time and grid data
         _dMag0Grid = self.dMag0s[mode["hex"]][sInd]
         _dMag0_intTimes = _dMag0Grid.int_times
-        int_time_ind = np.searchsorted(_dMag0_intTimes, intTime.to_value(u.d))
-        if int_time_ind >= len(_dMag0_intTimes):
-            int_time_ind = len(_dMag0_intTimes) - 1
+        int_time_ind = _dMag0Grid.exposure_index(intTime.to_value(u.d))
         fZ = self.ZodiacalLight.fZMap[mode["syst"]["name"]][sInd]
         kEZ = self.exact_kEZs[sInd]
         times = self.koTimes.mjd - TK.missionStart.mjd
@@ -3607,8 +3519,7 @@ class OrbixScheduler(SurveySimulation):
         time_limits=None,
         mission_limits=None,
         result=None,
-        selected_time=None,
-        selected_int=None,
+        selected_cell=None,
     ):
         """Plots a scheduling attempt.
 
@@ -3639,10 +3550,8 @@ class OrbixScheduler(SurveySimulation):
                 Boolean mask of mission time limits
             result (str, optional):
                 Result of scheduling attempt ("success", "threshold_failure", etc.)
-            selected_time (float, optional):
-                Selected observation time
-            selected_int (float, optional):
-                Selected integration time
+            selected_cell (tuple, optional):
+                Row and column of the selected observation in pdet
 
         Returns:
             str: Path to the saved plot file
@@ -3698,7 +3607,9 @@ class OrbixScheduler(SurveySimulation):
         fig.colorbar(im1, ax=axs[0], label="p(det)")
 
         # Highlight the selected point if available
-        if selected_time is not None and selected_int is not None:
+        if selected_cell is not None:
+            row, col = selected_cell
+            selected_time, selected_int = times[row], int_times[col]
             axs[0].plot(
                 selected_time, selected_int, "rx", markersize=10, label="Selected"
             )
@@ -3789,7 +3700,7 @@ class OrbixScheduler(SurveySimulation):
         axs[1].legend(handles=legend_elements, loc="upper right")
 
         # Highlight the selected point if available
-        if selected_time is not None and selected_int is not None:
+        if selected_cell is not None:
             axs[1].plot(selected_time, selected_int, "rx", markersize=10)
 
         axs[1].set_xlabel("Time (days from mission start)")
@@ -3820,8 +3731,7 @@ class OrbixScheduler(SurveySimulation):
             time_limits=time_limits,
             mission_limits=mission_limits,
             result=result,
-            selected_time=selected_time,
-            selected_int=selected_int,
+            selected_cell=selected_cell,
         )
 
         return filename
@@ -3839,8 +3749,7 @@ class OrbixScheduler(SurveySimulation):
         time_limits=None,
         mission_limits=None,
         result=None,
-        selected_time=None,
-        selected_int=None,
+        selected_cell=None,
     ):
         """Create individual constraint visualization plots for easier analysis."""
         # Create subdirectory for constraint plots
@@ -3951,7 +3860,9 @@ class OrbixScheduler(SurveySimulation):
         ax.legend(handles=legend_elements, loc="upper right", fontsize=14)
 
         # Highlight the selected point if available
-        if selected_time is not None and selected_int is not None:
+        if selected_cell is not None:
+            row, col = selected_cell
+            selected_time, selected_int = times[row], int_times[col]
             ax.plot(selected_time, selected_int, "rx", markersize=15, markeredgewidth=4)
             # Add annotation for the selected point
             # ax.annotate(
@@ -3983,12 +3894,8 @@ class OrbixScheduler(SurveySimulation):
         _last_obs_mjd = track.last_obs_mjd - self.TimeKeeping.missionStart.mjd
         info_text += f"Last Observation: {_last_obs_mjd:.2f} days ago\n"
 
-        if result == "success" or result == "bump_success":
-            if selected_time is not None and selected_int is not None:
-                time_idx = np.argmin(np.abs(times - selected_time))
-                int_idx = np.argmin(np.abs(int_times - selected_int))
-                if time_idx < pdet.shape[0] and int_idx < pdet.shape[1]:
-                    info_text += f"Selected pdet: {pdet[time_idx, int_idx]:.3f}"
+        if selected_cell is not None and result in {"success", "bump_success"}:
+            info_text += f"Selected pdet: {pdet[selected_cell]:.3f}"
 
         # Add text box with information
         # props = dict(boxstyle="round", facecolor="lightblue", alpha=0.8)
