@@ -20,10 +20,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.time import Time
 from EXOSIMS.Prototypes.SurveySimulation import SurveySimulation
+from hwoutils.constants import d2s
+from hwoutils.conversions import mjd_to_jd
 from intervaltree import Interval, IntervalTree
 from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.patches import Patch
-from orbix.kepler.shortcuts import get_grid_solver
+from orbix.kepler import Grid
 
 from exosims_plugins.dmag0 import dMag0_grid
 
@@ -478,9 +480,7 @@ class OrbixScheduler(SurveySimulation):
         # Right now this is fixed to the exact value of all debris disks
         nEZ_range = np.array([SU.fixed_nEZ_val])
         self.dMag0s = {}
-        self.solver = get_grid_solver(
-            level="scalar", jit=False, kind="bilinear", E=False, trig=True
-        )
+        self.solver = Grid()
         for mode in OS.observingModes:
             # Use the appropriate SNR margin based on detection mode
             if "spec" in mode["inst"]["name"]:
@@ -3169,7 +3169,7 @@ class OrbixScheduler(SurveySimulation):
         """Format mission statistics into a readable summary string."""
         # Basic mission stats
         lines = [
-            "\n══════════════ MISSION TRACKER ══════════════",
+            "\n============== MISSION TRACKER ==============",
             (
                 f"Planets: {stats['detected_planets']} detected | "
                 f"{stats['chars_completed']} characterized"
@@ -3255,7 +3255,7 @@ class OrbixScheduler(SurveySimulation):
         lines.append(
             f"Mission time: {obs_year:6.2f}/{end_time:6.2f} ({fraction_remaining:.2f}%)"
         )
-        lines.append("═════════════════════════════════════════════")
+        lines.append("=============================================")
         return "\n".join(lines)
 
     def get_mission_stats(self, action=None):
@@ -3675,7 +3675,7 @@ class OrbixScheduler(SurveySimulation):
         fig.suptitle(
             (
                 f"{star_name} ({star_dist:.2f} pc) - Planet {pInd} ({radius:.1f} "
-                f"R⊕, {a:.2f} AU) - {observation_type} Scheduling\n"
+                f"REarth, {a:.2f} AU) - {observation_type} Scheduling\n"
             )
             + (
                 f"{det_status}, {char_status} - Max pdet: {np.max(pdet):.3f},"
@@ -3863,7 +3863,8 @@ class OrbixScheduler(SurveySimulation):
         # Add title with relevant information
         fig.suptitle(
             (
-                f"{star_name} ({star_dist:.2f} pc) - Planet {pInd} ({radius:.1f} R⊕, "
+                f"{star_name} ({star_dist:.2f} pc) - Planet {pInd} "
+                f"({radius:.1f} REarth, "
                 f"{a:.2f} AU)\n"
             ),
             fontsize=18,
@@ -4312,13 +4313,13 @@ class OrbixScheduler(SurveySimulation):
 
             # Calculate times
             start_mjd = action.start
-            start_jd = start_mjd + 2400000.5  # MJD to JD conversion
+            start_jd = mjd_to_jd(start_mjd)  # MJD to JD conversion
             start_time = Time(start_mjd, format="mjd")
             start_year = start_time.decimalyear
 
             # Get integration time
             int_time_d = action.int_time if action.int_time else 0.0
-            int_time_s = int_time_d * 86400.0  # days to seconds
+            int_time_s = int_time_d * d2s  # days to seconds
 
             # Get wavelength info from mode
             central_wavelength_nm = mode["lam"].to_value(u.nm)
@@ -5133,22 +5134,22 @@ class OrbixScheduler(SurveySimulation):
             """Get status indicator for planet label."""
             key = (sInd, pInd)
             if hasattr(self, "_completed_planets") and key in self._completed_planets:
-                return "✓"  # Completed characterization
+                return "ok"  # Completed characterization
             if key in self.retired_tracks:
                 track = self.retired_tracks[key]
                 reason = getattr(track, "retirement_reason", "unknown")
                 # Map reasons to short indicators with specific NC sub-types
                 reason_map = {
-                    "not_characterizable": "✗ NC",  # Generic not characterizable
-                    "not_char_iwa": "✗ NC-I",  # Inside IWA (too close)
-                    "not_char_owa": "✗ NC-O",  # Outside OWA (too far)
-                    "not_char_phot": "✗ NC-P",  # Photometric (too faint)
-                    "max_char_failures": "✗ CF",  # Char failures
-                    "max_det_failures": "✗ DF",  # Det failures
-                    "max_requeue_attempts": "✗ RQ",  # Requeue exhausted
-                    "unknown": "✗",
+                    "not_characterizable": "x NC",  # Generic not characterizable
+                    "not_char_iwa": "x NC-I",  # Inside IWA (too close)
+                    "not_char_owa": "x NC-O",  # Outside OWA (too far)
+                    "not_char_phot": "x NC-P",  # Photometric (too faint)
+                    "max_char_failures": "x CF",  # Char failures
+                    "max_det_failures": "x DF",  # Det failures
+                    "max_requeue_attempts": "x RQ",  # Requeue exhausted
+                    "unknown": "x",
                 }
-                return reason_map.get(reason, "✗")
+                return reason_map.get(reason, "x")
             if key in self.planet_tracks:
                 track = self.planet_tracks[key]
                 return f"D{track.det_successes}/C{track.char_successes}"
@@ -5169,7 +5170,7 @@ class OrbixScheduler(SurveySimulation):
             a = self.SimulatedUniverse.a[pInd].to_value(u.AU)  # Semi-major axis
             radius = self.SimulatedUniverse.Rp[pInd].to_value(u.earthRad)
             # Format the label with planet properties (status shown on right axis)
-            label = f"S{sInd} - P{pInd} ({radius:.1f} R⊕, {a:.2f} AU)"
+            label = f"S{sInd} - P{pInd} ({radius:.1f} REarth, {a:.2f} AU)"
 
             planet_labels.append(label)
 
@@ -5352,11 +5353,11 @@ class OrbixScheduler(SurveySimulation):
         # Build summary text for the status codes
         summary_lines = [
             "Status Codes:",
-            f"  ✓ = Characterized ({n_completed})",
+            f"  ok = Characterized ({n_completed})",
         ]
         # Show NC breakdown if there are any
         if n_not_char_total > 0:
-            summary_lines.append(f"  ✗ NC = Not characterizable ({n_not_char_total}):")
+            summary_lines.append(f"  x NC = Not characterizable ({n_not_char_total}):")
             if n_nc_iwa > 0:
                 summary_lines.append(f"      NC-I = Inside IWA ({n_nc_iwa})")
             if n_nc_owa > 0:
@@ -5366,11 +5367,11 @@ class OrbixScheduler(SurveySimulation):
             if n_nc_generic > 0:
                 summary_lines.append(f"      NC = Other ({n_nc_generic})")
         if n_char_fail > 0:
-            summary_lines.append(f"  ✗ CF = Char failures ({n_char_fail})")
+            summary_lines.append(f"  x CF = Char failures ({n_char_fail})")
         if n_det_fail > 0:
-            summary_lines.append(f"  ✗ DF = Det failures ({n_det_fail})")
+            summary_lines.append(f"  x DF = Det failures ({n_det_fail})")
         if n_requeue > 0:
-            summary_lines.append(f"  ✗ RQ = Requeue exhausted ({n_requeue})")
+            summary_lines.append(f"  x RQ = Requeue exhausted ({n_requeue})")
         if n_active > 0:
             summary_lines.append(f"  D#/C# = Active track ({n_active})")
 

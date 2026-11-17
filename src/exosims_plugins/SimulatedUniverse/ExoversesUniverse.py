@@ -1,3 +1,5 @@
+"""Simulated universe populated from an exoverses catalog."""
+
 import astropy.units as u
 import numpy as np
 from astropy.time import Time
@@ -6,12 +8,15 @@ from exosims_plugins.SimulatedUniverse.OrbixUniverse import OrbixUniverse
 
 
 class ExoversesUniverse(OrbixUniverse):
+    """Populate EXOSIMS planets from matched exoverses systems."""
+
     def __init__(self, *args, **specs):
+        """Initialize the catalog-backed universe."""
         super().__init__(*args, **specs)
 
     def gen_physical_properties(self, **specs):
+        """Copy orbital elements and physical properties for matched stars."""
         universe = specs.get("exoverses_universe")
-        PPop = self.PlanetPopulation
         TL = self.TargetList
 
         sc_df = self.TargetList.StarCatalog.data
@@ -19,7 +24,7 @@ class ExoversesUniverse(OrbixUniverse):
         keep_sInds = []
         system_to_HPIC_name = {}
         HPIC_name_to_exoverses_name = {}
-        for i, system in enumerate(universe.systems):
+        for _i, system in enumerate(universe.systems):
             nPlanets = len(system.planets)
             # Get the HIP number of the star
             HIP = float(system.star.name.split(" ")[1])
@@ -63,7 +68,7 @@ class ExoversesUniverse(OrbixUniverse):
 
         # Get the number of planets for each system in the exoverses universe
         plan2star = np.array([], dtype=int)
-        for i, system in enumerate(universe.systems):
+        for _i, system in enumerate(universe.systems):
             nPlanets = len(system.planets)
             if system.star.name not in system_to_HPIC_name:
                 # Star not kept
@@ -91,11 +96,11 @@ class ExoversesUniverse(OrbixUniverse):
             system_name = TL.Name[star_ind]
             if system_name in ignored_systems:
                 continue
-            system = [
+            system = next(
                 s
                 for s in universe.systems
                 if HPIC_name_to_exoverses_name[system_name] == s.star.name
-            ][0]
+            )
             if len(system.planets) == 0:
                 # No planets in the system
                 print(f"No planets in system {system.star.name}")

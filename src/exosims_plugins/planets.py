@@ -1,6 +1,6 @@
 """Base planet model.
 
-Composes :class:`orbix.orbit.KeplerianOrbit` for geometric
+Composes :class:`orbix.system.FrameOrbit` for geometric
 propagation; RV-specific derived quantities (semi-amplitude, minimum
 mass, ``secosw`` / ``sesinw``) live on ``Planets`` for the orbit-only
 fitting pipeline.
@@ -22,19 +22,17 @@ from hwoutils.constants import (
     two_pi,
 )
 from jaxtyping import Array
-from orbix.equations.phase import lambert_phase_exact
-from orbix.orbit import AbstractOrbit, KeplerianOrbit
+from orbix.system import FrameOrbit, distance_AU, offset_arcsec, phase_angle_rad
+from skyscapes.physical_model import reflected_contrast
 
 
 class Planets(eqx.Module):
     """JAX-friendly planet model that composes an orbit.
 
-    Geometry lives on ``self.orbit`` (an ``AbstractOrbit``, concretely
-    ``KeplerianOrbit`` today). RV and photometric derived quantities
-    stay on ``Planets`` for the orbit-only fitting pipeline.
+    Geometry lives on ``self.orbit`` (a ``FrameOrbit``). RV and photometric derived
+    quantities stay on ``Planets`` for the orbit-only fitting pipeline.
 
-    Constructor arguments (unit-suffix naming, phase 0c of the
-    skyscapes migration):
+    Constructor arguments:
         Ms_kg: stellar mass in kg
         dist_pc: distance to star in pc
         a_AU, e, W_rad, i_rad, w_rad, M0_rad, t0_d: orbital elements
@@ -48,7 +46,7 @@ class Planets(eqx.Module):
     """
 
     # Composed geometry
-    orbit: AbstractOrbit
+    orbit: FrameOrbit
 
     # Retained public fields (unit-suffixed)
     Ms_kg: Array
@@ -93,7 +91,7 @@ class Planets(eqx.Module):
         Rp_Rearth,
         Ag,
     ):
-        """Build a Planets instance with a composed KeplerianOrbit.
+        """Build a Planets instance with a composed FrameOrbit.
 
         See the class docstring for parameter units.
         """
@@ -110,15 +108,16 @@ class Planets(eqx.Module):
         self.Rp_AU = Rp_Rearth * Rearth2AU
         self.Ag = Ag
 
-        # Geometry via KeplerianOrbit
-        self.orbit = KeplerianOrbit(
+        # Geometry in the east, north, away sky frame.
+        self.orbit = FrameOrbit.from_classical(
             a_AU=a_AU,
             e=e,
             W_rad=W_rad,
             i_rad=i_rad,
             w_rad=w_rad,
             M0_rad=M0_rad,
-            t0_d=t0_d,
+            epoch_d=t0_d,
+            mu_AU3_per_d2=G * Ms_kg,
         )
 
         # Derived quantities that need stellar context
@@ -157,13 +156,15 @@ class Planets(eqx.Module):
 
     def prop_AU(self, trig_solver, t):
         """Position vectors in AU, shape ``(K, 3, T)``."""
-        r_AU, _, _ = self.orbit.propagate(trig_solver, t, Ms_kg=self.Ms_kg)
-        return r_AU
+        r_AU, _ = self.orbit.at(t, solver=trig_solver)
+        return jnp.moveaxis(r_AU, -1, -2)
 
     def prop_as(self, trig_solver, t):
         """Position vectors in arcsec, shape ``(K, 3, T)``."""
-        r_AU = self.prop_AU(trig_solver, t)
-        return r_AU * self._rad2arcsec_dist[:, None, None]
+        r_AU = jnp.moveaxis(self.prop_AU(trig_solver, t), -2, -1)
+        east, north = offset_arcsec(r_AU, self.dist_pc)
+        away = r_AU[..., 2] * self._rad2arcsec_dist[:, None]
+        return jnp.stack((east, north, away), axis=1)
 
     def prop_ra_dec(self, trig_solver, t):
         """(RA_arcsec, Dec_arcsec) each ``(K, T)``."""
@@ -172,18 +173,15 @@ class Planets(eqx.Module):
 
     def s_dMag(self, trig_solver, t):
         """Return (projected separation AU, dMag) each ``(K, T)``."""
-        r_AU, phase_angle_rad, dist_AU = self.orbit.propagate(
-            trig_solver,
-            t,
-            Ms_kg=self.Ms_kg,
+        r_AU, _ = self.orbit.at(t, solver=trig_solver)
+        dist_AU = distance_AU(r_AU)
+        s = jnp.hypot(r_AU[..., 0], r_AU[..., 1])
+        log_arg = reflected_contrast(
+            phase_angle_rad(r_AU),
+            dist_AU,
+            self.Ag[:, None],
+            self.Rp_AU[:, None] / Rearth2AU,
         )
-        s = jnp.sqrt(r_AU[:, 0] ** 2 + r_AU[:, 1] ** 2)
-
-        cosbeta = jnp.cos(phase_angle_rad)
-        sinbeta = jnp.sin(phase_angle_rad)
-        phase = lambert_phase_exact(cosbeta, sinbeta)
-
-        log_arg = self.Ag[:, None] * (self.Rp_AU[:, None] / dist_AU) ** 2 * phase
         eps = jnp.finfo(log_arg.dtype).tiny
         dMag = -2.5 * jnp.log10(log_arg + eps)
         return s, dMag

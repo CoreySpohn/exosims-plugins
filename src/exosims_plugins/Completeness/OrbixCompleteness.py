@@ -120,8 +120,8 @@ class OrbixCompleteness(BrownCompleteness):
             "w_rad": np.array(self._planets.w_rad),
             "M0_rad": np.array(self._planets.M0_rad),
             "t0_d": np.array(self._planets.t0_d),
-            "Mp_Mearth": np.array(self._planets.Mp_kg / Mearth2kg),
-            "Rp_Rearth": np.array(self._planets.Rp_AU / Rearth2AU),
+            "Mp_kg": np.array(self._planets.Mp_kg),
+            "Rp_AU": np.array(self._planets.Rp_AU),
             "Ag": np.array(self._planets.Ag),
         }
 
@@ -156,9 +156,21 @@ class OrbixCompleteness(BrownCompleteness):
             # Load Planets object data
             planets_data = robust_pickle_load(str(planets_path))
 
-            # Reconstruct Planets object
+            # Reconstruct Planets object. Stored Mp_kg/Rp_AU must be converted
+            # back to Earth units for the constructor.
             self._planets = Planets(
-                **{k: jnp.asarray(v) for k, v in planets_data.items()}
+                Ms_kg=jnp.array(planets_data["Ms_kg"]),
+                dist_pc=jnp.array(planets_data["dist_pc"]),
+                a_AU=jnp.array(planets_data["a_AU"]),
+                e=jnp.array(planets_data["e"]),
+                W_rad=jnp.array(planets_data["W_rad"]),
+                i_rad=jnp.array(planets_data["i_rad"]),
+                w_rad=jnp.array(planets_data["w_rad"]),
+                M0_rad=jnp.array(planets_data["M0_rad"]),
+                t0_d=jnp.array(planets_data["t0_d"]),
+                Mp_Mearth=jnp.array(planets_data["Mp_kg"]) / Mearth2kg,
+                Rp_Rearth=jnp.array(planets_data["Rp_AU"]) / Rearth2AU,
+                Ag=jnp.array(planets_data["Ag"]),
             )
 
             # Load orbital data
@@ -199,12 +211,25 @@ class OrbixCompleteness(BrownCompleteness):
         _M0 = jnp.array(np.random.uniform(high=2.0 * np.pi, size=self.Nplanets))
         _t0 = jnp.zeros(self.Nplanets)
 
-        # Mp doesn't matter for completeness
+        # Mp doesn't matter for completeness (1 Earth mass placeholder)
         _Mp = jnp.ones(self.Nplanets)
         # Distance and mass will be handled later
         _dist = jnp.ones(self.Nplanets)
         _Ms = jnp.ones(self.Nplanets) * Msun2kg
-        self._planets = Planets(_Ms, _dist, _a, _e, _W, _i, _w, _M0, _t0, _Mp, _Rp, _p)
+        self._planets = Planets(
+            Ms_kg=_Ms,
+            dist_pc=_dist,
+            a_AU=_a,
+            e=_e,
+            W_rad=_W,
+            i_rad=_i,
+            w_rad=_w,
+            M0_rad=_M0,
+            t0_d=_t0,
+            Mp_Mearth=_Mp,
+            Rp_Rearth=_Rp,
+            Ag=_p,
+        )
 
         # Propagate the orbits
         end_time = TK.missionLife_d
