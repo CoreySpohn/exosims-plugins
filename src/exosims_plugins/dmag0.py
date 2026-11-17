@@ -10,7 +10,6 @@ import equinox as eqx
 import EXOSIMS
 import jax.numpy as jnp
 import numpy as np
-import zodi
 from EXOSIMS.util.utils import dictToSortedStr, genHexStr
 from jax import lax, vmap
 from tqdm import tqdm
@@ -20,15 +19,17 @@ CACHE_DIR = Path(Path.home(), ".orbix", "cache", "dMag0_grid")
 
 
 def epoch_jez(TL, sInd, mode, r_au, nzodi, *, fbeta=None):
-    """Scale a star's EEID reference JEZ to planet-star distances in AU.
+    """Scale a star's 1 AU reference JEZ to planet-star distances in AU.
 
-    By default, use the system's latitudinal factor. Pass ``fbeta=1`` when
-    ``nzodi`` already includes the latitudinal factor, as in kEZ.
+    EXOSIMS 3.6.6 and later store ``JEZ0`` at 1 AU, so the epoch value is
+    ``JEZ0 * nzodi * fbeta / r**2`` with no luminosity factor; the EEID
+    value is ``JEZ0 / L``. By default, use the system's latitudinal factor.
+    Pass ``fbeta=1`` when ``nzodi`` already includes it, as in kEZ.
     """
     jez0 = TL.JEZ0[mode["hex"]][sInd]
     if fbeta is None:
         fbeta = TL.system_fbeta[sInd]
-    return zodi.scale_jez(jez0.value, nzodi, r_au, fbeta, TL.L[sInd]) << jez0.unit
+    return jez0 * nzodi * fbeta / np.asarray(r_au) ** 2
 
 
 def safe_cache_load(cache_path):

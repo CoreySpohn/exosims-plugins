@@ -69,8 +69,12 @@ def test_exposure_index_uses_days_and_clips_to_grid():
     assert grid.exposure_index(100.0) == 2
 
 
-def test_epoch_jez_scales_from_eeid():
-    """Restore the factor of luminosity when scaling away from the EEID."""
+def test_epoch_jez_scales_from_one_au():
+    """Scale the 1 AU reference by 1/r**2 with no luminosity factor.
+
+    EXOSIMS 3.6.6 removed the 1/L from JEZ0; a factor of L here would count
+    the luminosity a second time in the other direction.
+    """
     unit = u.photon / (u.s * u.m**2 * u.arcsec**2)
     mode = {"hex": "test"}
     jez0, nzodi, fbeta, luminosity, r_au = 8.0, 3.0, 0.5, 4.0, 2.0
@@ -80,8 +84,7 @@ def test_epoch_jez_scales_from_eeid():
         L=np.array([1.0, luminosity]),
     )
     actual = dmag0.epoch_jez(tl, 1, mode, r_au, nzodi).to_value(unit)
-    assert actual == jez0 * nzodi * fbeta * luminosity / r_au**2
-    assert actual / (jez0 * nzodi * fbeta / r_au**2) == luminosity
+    assert actual == jez0 * nzodi * fbeta / r_au**2
 
 
 def test_grid_cache_key_includes_full_axes(monkeypatch):
