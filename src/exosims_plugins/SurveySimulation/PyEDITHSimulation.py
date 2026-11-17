@@ -23,6 +23,7 @@ import pandas as pd
 from EXOSIMS.Prototypes.SurveySimulation import SurveySimulation
 from hwoutils.constants import d2s
 from hwoutils.conversions import lambda_d_to_arcsec, um_to_nm
+from optixstuff import YippyCoronagraph
 
 # pyEDITH imports
 from pyEDITH import (
@@ -33,7 +34,7 @@ from pyEDITH import (
     parse_input,
 )
 from tqdm import tqdm
-from yippy import DEFAULT_APERTURE_RULE, Circular, Coronagraph
+from yippy import DEFAULT_APERTURE_RULE, Circular, EqxCoronagraph
 
 
 class PyEDITHSimulation(SurveySimulation):
@@ -870,9 +871,9 @@ class PyEDITHSimulation(SurveySimulation):
     # =========================================================================
 
     def _load_yippy_coronagraph(self):
-        """Load yippy Coronagraph with spline interpolators for vectorized ETC.
+        """Load the optical-path adapter for vectorized ETC.
 
-        The yippy Coronagraph provides pre-computed radial performance curves:
+        The optixstuff YippyCoronagraph exposes prepared radial performance curves:
         - throughput(sep_lod) -> core throughput
         - raw_contrast(sep_lod) -> stellar contrast
         - occulter_transmission(sep_lod) -> sky transmission
@@ -895,10 +896,14 @@ class PyEDITHSimulation(SurveySimulation):
             )
 
         self.vprint(f"Loading yippy Coronagraph from: {coro_path}")
-        self._yippy_coronagraph = Coronagraph(coro_path, rule=self.aperture_rule)
+        self._yippy_coronagraph = YippyCoronagraph(
+            backend=EqxCoronagraph(coro_path, rule=self.aperture_rule)
+        )
 
         # Store key parameters
-        self._coro_IWA_lod = float(self._yippy_coronagraph.iwa_lod)
+        self._coro_IWA_lod = float(
+            self._yippy_coronagraph.curves(self.aperture_rule).iwa_lod
+        )
         self._coro_OWA_lod = float(self.det_params.get("maximum_OWA", np.inf))
 
         self.vprint(
@@ -950,14 +955,18 @@ class PyEDITHSimulation(SurveySimulation):
         sep_flat = sep_lod.flatten()
 
         # Get coronagraph performance at all separations (vectorized!)
-        throughput = np.clip(coro.throughput(sep_flat), 0, 1).reshape(shape)
+        throughput = np.clip(
+            coro.throughput(sep_flat, rule=self.aperture_rule), 0, 1
+        ).reshape(shape)
         Istar_diffraction = np.maximum(
-            coro.performance.evaluate("leakage_density_lod2", sep_flat), 1e-20
+            coro.leakage_density_lod2(sep_flat, rule=self.aperture_rule), 1e-20
         ).reshape(shape)
         # Note: skytrans (occ_trans) not used - we use core_throughput for zodi per AYO
 
         # Use the area and leakage density of the selected photometric rule.
-        omega = np.asarray(coro.core_area(sep_flat)).reshape(shape)
+        omega = np.asarray(coro.core_area(sep_flat, rule=self.aperture_rule)).reshape(
+            shape
+        )
 
         Istar = Istar_diffraction
 

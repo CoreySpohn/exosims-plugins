@@ -26,6 +26,7 @@ import pandas as pd
 from EXOSIMS.Prototypes.SurveySimulation import SurveySimulation
 from hwoutils.constants import d2s
 from hwoutils.conversions import lambda_d_to_arcsec, um_to_nm, years_to_days
+from optixstuff import YippyCoronagraph
 from orbix.kepler import Grid
 
 # pyEDITH imports
@@ -37,7 +38,7 @@ from pyEDITH import (
     parse_input,
 )
 from tqdm import tqdm
-from yippy import DEFAULT_APERTURE_RULE, Circular, Coronagraph
+from yippy import DEFAULT_APERTURE_RULE, Circular, Coronagraph, EqxCoronagraph
 
 # Get Kepler solver
 solver = Grid()
@@ -819,11 +820,10 @@ class AYOSimulation2(SurveySimulation):
         self._yippy_coronagraph = Coronagraph(
             coro_path,
             rule=self.aperture_rule,
-            contrast_floor=1e-10,
         )
 
         # Store key parameters
-        self._coro_IWA_lod = float(self._yippy_coronagraph.iwa_lod)
+        self._coro_IWA_lod = float(self._yippy_coronagraph.performance.iwa_lod)
         self._coro_OWA_lod = float(self.det_params.get("maximum_OWA", np.inf))
 
         self.vprint(
@@ -1102,7 +1102,8 @@ class AYOSimulation2(SurveySimulation):
         )
         record = coro.compute_all_performance_curves(rule=rule)
         Istar = record.evaluate("leakage_density_lod2", sep_flat).reshape(shape)
-        SkyTrans = coro.occulter_transmission(sep_flat).reshape(shape)
+        adapter = YippyCoronagraph(backend=EqxCoronagraph(yippy_coro=coro))
+        SkyTrans = np.asarray(adapter.occulter_transmission(sep_flat)).reshape(shape)
         throughput = np.clip(record.evaluate("throughput", sep_flat), 0, 1).reshape(
             shape
         )
@@ -1402,11 +1403,12 @@ class AYOSimulation2(SurveySimulation):
 
         # Occulter Transmission (SkyTrans) is constant across apertures
         # Used for Zodi background calculation
-        SkyTrans = coro.occulter_transmission(sep_flat).reshape(shape)
+        adapter = YippyCoronagraph(backend=EqxCoronagraph(yippy_coro=coro))
+        SkyTrans = np.asarray(adapter.occulter_transmission(sep_flat)).reshape(shape)
 
         # Noise floor for CRnf calculation
         # If we have a CSV-based noise floor (from AYO output), use it directly.
-        # Otherwise, use yippy's noise_floor method with the same ppf=30.
+        # Otherwise, divide leakage density by the same ppf=30.
         if (
             hasattr(self, "_noise_floor_interp")
             and self._noise_floor_interp is not None
@@ -1417,7 +1419,7 @@ class AYOSimulation2(SurveySimulation):
             ).reshape(shape)
             use_csv_noisefloor = True
         else:
-            # Use yippy's noise_floor method (computes Contrast/PPF correctly)
+            # Divide leakage density by the post-processing factor.
             noise_floor_density = np.maximum(
                 Istar.flatten() / noisefloor_PPF, 1e-15
             ).reshape(shape)

@@ -22,17 +22,17 @@ WAIVER = "internal-ref-ok"
 
 PATTERNS = [
     # Research-workspace paths and project homes.
-    r"mission-control",
-    r"research-brain",
-    r"physicaloptix-setup",
-    r"\bbrain/",
-    r"deep-thoughts",
+    r"mission-control",  # internal-ref-ok
+    r"research-brain",  # internal-ref-ok
+    r"physicaloptix-setup",  # internal-ref-ok
+    r"\bbrain/",  # internal-ref-ok
+    r"deep-thoughts",  # internal-ref-ok
     # Underscored ALL-CAPS markdown names are internal working documents.
-    r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\.md\b",
+    r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\.md\b",  # internal-ref-ok
     # Project spike/script homes and decision-history vocabulary.
-    r"eac1_dlux",
-    r"Tier-G",
-    r"(?i)\bgreenfield\b",
+    r"eac1_dlux",  # internal-ref-ok
+    r"Tier-G",  # internal-ref-ok
+    r"(?i)\bgreenfield\b",  # internal-ref-ok
 ]
 
 COMPILED = [(pattern, re.compile(pattern)) for pattern in PATTERNS]
